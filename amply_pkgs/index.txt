@@ -1,0 +1,21 @@
+; Индекс репозитория Amply, встраивается в initrd как amply_index.txt.
+; Каждый блок — один пакет. Пути amf= указывают на VFS-имя в initrd
+; (без ведущего слэша, как и любые другие initrd-файлы).
+
+[pkg]
+name=welcome
+version=1.0.0
+amf=amply_welcome.amf
+summary=Приветственный набор AMPLIFY-OS (база)
+
+[pkg]
+name=cyber-theme
+version=1.2.0
+amf=amply_cyber_theme.amf
+summary=Тёмная неоновая тема (обои + конфиг compositor)
+
+[pkg]
+name=notes-pack
+version=0.3.1
+amf=amply_notes_pack.amf
+summary=Стартовые заметки и подсказки для Notes

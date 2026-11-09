@@ -1,0 +1,4 @@
+# Опциональные зависимости для ai_ui_gen.py
+# Всё опционально: скрипт работает и без них (режим safe default).
+# Установка: pip3 install -r tools/ai_ui_gen_requirements.txt
+Pillow>=10.0.0

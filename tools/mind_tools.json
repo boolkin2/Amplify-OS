@@ -1,0 +1,7 @@
+[
+  {"type": "function", "function": {"name": "ps", "description": "Show the state of this computer: uptime, CPU cores, memory, running tasks and open windows.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+  {"type": "function", "function": {"name": "ls", "description": "List files in a directory. The system disk is /disk.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Directory, for example /disk or /disk/vault"}}, "required": ["path"]}}},
+  {"type": "function", "function": {"name": "read", "description": "Show the beginning of a text file.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "File path, for example /disk/Sanctum/system.conf"}}, "required": ["path"]}}},
+  {"type": "function", "function": {"name": "logs", "description": "Show the last lines of the kernel log.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+  {"type": "function", "function": {"name": "exec", "description": "Run a shell command of AMPLIFY-OS. The user has to confirm it.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command, for example clock or disk"}}, "required": ["command"]}}}
+]

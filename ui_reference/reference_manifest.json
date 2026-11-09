@@ -1,0 +1,162 @@
+{
+  "design": "AMPLIFY-OS Pearl",
+  "logicalCanvas": {
+    "width": 1600,
+    "height": 1000
+  },
+  "screens": [
+    {
+      "index": 1,
+      "slug": "ignite",
+      "title_ru": "Загрузка / splash",
+      "file": "ui_reference/AmplifyOS_01_ignite.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/splash.c"
+    },
+    {
+      "index": 2,
+      "slug": "apex",
+      "title_ru": "Домашний dashboard",
+      "file": "ui_reference/AmplifyOS_02_apex.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/desktop.c"
+    },
+    {
+      "index": 3,
+      "slug": "identity",
+      "title_ru": "Вход и блокировка",
+      "file": "ui_reference/AmplifyOS_03_identity.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/login.c"
+    },
+    {
+      "index": 4,
+      "slug": "strata",
+      "title_ru": "Файловый менеджер",
+      "file": "ui_reference/AmplifyOS_04_strata.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/apps.c"
+    },
+    {
+      "index": 5,
+      "slug": "pulse",
+      "title_ru": "Консоль и runner",
+      "file": "ui_reference/AmplifyOS_05_pulse.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/apps.c"
+    },
+    {
+      "index": 6,
+      "slug": "facet",
+      "title_ru": "Обои и темы",
+      "file": "ui_reference/AmplifyOS_06_facet.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_facet.c"
+    },
+    {
+      "index": 7,
+      "slug": "thread",
+      "title_ru": "Заметки",
+      "file": "ui_reference/AmplifyOS_07_thread.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/apps.c"
+    },
+    {
+      "index": 8,
+      "slug": "signal",
+      "title_ru": "Уведомления и inbox",
+      "file": "ui_reference/AmplifyOS_08_signal.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_signal.c"
+    },
+    {
+      "index": 9,
+      "slug": "arc",
+      "title_ru": "Календарь и timeline",
+      "file": "ui_reference/AmplifyOS_09_arc.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_arc.c"
+    },
+    {
+      "index": 10,
+      "slug": "resonance",
+      "title_ru": "Музыка и audio",
+      "file": "ui_reference/AmplifyOS_10_resonance.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_resonance.c"
+    },
+    {
+      "index": 11,
+      "slug": "core",
+      "title_ru": "Настройки",
+      "file": "ui_reference/AmplifyOS_11_core.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_core.c"
+    },
+    {
+      "index": 12,
+      "slug": "mesh",
+      "title_ru": "Сеть",
+      "file": "ui_reference/AmplifyOS_12_mesh.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_mesh.c"
+    },
+    {
+      "index": 13,
+      "slug": "capacity",
+      "title_ru": "Хранилище",
+      "file": "ui_reference/AmplifyOS_13_capacity.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/app_capacity.c"
+    },
+    {
+      "index": 14,
+      "slug": "palette",
+      "title_ru": "Внешний вид",
+      "file": "ui_reference/AmplifyOS_14_palette.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: app_core.c/app_facet.c"
+    },
+    {
+      "index": 15,
+      "slug": "beacon",
+      "title_ru": "Центр уведомлений",
+      "file": "ui_reference/AmplifyOS_15_beacon.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/beacon.c"
+    },
+    {
+      "index": 16,
+      "slug": "constellation",
+      "title_ru": "Переключатель окон",
+      "file": "ui_reference/AmplifyOS_16_constellation.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "NEW: kernel/arch/x86_64/constellation.c"
+    },
+    {
+      "index": 17,
+      "slug": "amplifier",
+      "title_ru": "Системный монитор",
+      "file": "ui_reference/AmplifyOS_17_amplifier.png",
+      "width": 1600,
+      "height": 1000,
+      "target": "kernel/arch/x86_64/apps.c"
+    }
+  ]
+}

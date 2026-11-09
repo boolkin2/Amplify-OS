@@ -1,0 +1,18 @@
+# Эталоны этапа 49 (AMPLIFY MIND). Получены НЕЗАВИСИМОЙ numpy-реализацией
+# tools/mind_ref.py (Windows-python) — ядро их не видит и не генерирует.
+# Системный промпт — k_system из kernel/arch/x86_64/mind.c:
+#   You are MIND, the assistant built into AMPLIFY-OS, a small operating system
+#   written from scratch. Answer briefly and clearly. When tool output is given,
+#   answer using only that output.
+# Команды:
+#   python tools/mind_ref.py gen build/mind/stories260K.gguf "Once upon a time" 32
+#   python tools/mind_ref.py gen build/mind/SmolLM2-135M-Instruct-Q8_0.gguf "<Q>" 80 --chat "--system=<k_system>"
+# Модель: SmolLM2-135M-Instruct-Q8_0.gguf sha256 5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83
+STORIES_PROMPT=1,403,407,261,378
+STORIES_IDS=432,383,286,261,376,298,315,421,395,317,426,338,401,396,267,337,410,408,419,292,411,322,265,282,295,433,426,385,328,432,358,394
+Q1=What is the capital of France?
+Q1_PROMPT_LEN=63
+Q1_IDS=504,3575,282,4649,314,7042,30,2
+Q1_TEXT=The capital of France is Paris.
+Q2=Explain what an operating system kernel does.
+Q2_IDS=2089,5496,817,11498,314,260,4007,5077,282,253,2583,817,338,20567,260,8578,1952,28,715,347,3500,28,3007,31,4952,3381,28,284,817,3078,28,284,2433,260,3941,327,14768,351,550,3197,3253,30,657,6104,347,260,2106,282,260,2583,28,7729,4381,715,347,3500,2343,28,2301,817,1594,28,284,817,3753,2343,30,198,198,504,11498,314,3358,327,42,198,198,29,22248,3500

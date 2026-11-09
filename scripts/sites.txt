@@ -1,0 +1,74 @@
+# Список для scripts/survey_sites.sh: адреса, как их набрал бы человек.
+# Плитки стартовой страницы браузера
+https://example.com/
+http://info.cern.ch/
+https://ru.wikipedia.org/
+https://news.ycombinator.com/
+https://text.npr.org/
+https://lite.cnn.com/
+https://html.duckduckgo.com/html/
+# Без схемы (https, затем http)
+wikipedia.org
+ya.ru
+google.com
+# Не адрес, а поисковый запрос (уходит в DuckDuckGo)
+linux kernel
+amplify os x86
+# Статьи и большие страницы
+https://ru.wikipedia.org/wiki/Linux
+https://en.wikipedia.org/wiki/Operating_system
+https://ru.wikipedia.org/w/index.php?search=linux+kernel
+# Поиск без скриптов
+https://lite.duckduckgo.com/lite/?q=osdev
+# Разное популярное
+https://www.kernel.org/
+https://www.debian.org/
+https://www.python.org/
+https://github.com/
+https://github.com/torvalds/linux
+https://habr.com/ru/articles/
+https://lenta.ru/
+https://www.rbc.ru/
+https://www.opennet.ru/
+https://lib.ru/
+https://www.bbc.com/news
+https://old.reddit.com/
+https://stackoverflow.com/questions
+https://wttr.in/Moscow
+https://www.rfc-editor.org/rfc/rfc793.txt
+https://httpbin.org/gzip
+https://www.cloudflare.com/
+https://www.microsoft.com/
+https://www.apple.com/
+https://mail.ru/
+https://vk.com/
+https://www.youtube.com/
+# Ещё: новости, справочники, технические сайты
+https://www.gnu.org/
+https://www.w3.org/
+https://developer.mozilla.org/ru/
+https://www.openbsd.org/
+https://archlinux.org/
+https://www.freebsd.org/
+https://wiki.osdev.org/Main_Page
+https://www.theguardian.com/international
+https://www.reuters.com/
+https://ria.ru/
+https://tass.ru/
+https://www.kommersant.ru/
+https://www.gazeta.ru/
+https://3dnews.ru/
+https://www.ixbt.com/
+https://www.linux.org.ru/
+https://4pda.to/
+https://pikabu.ru/
+https://dzen.ru/
+https://yandex.ru/
+https://www.gosuslugi.ru/
+https://www.sberbank.ru/
+https://www.ozon.ru/
+https://www.avito.ru/
+https://www.amazon.com/
+https://www.nytimes.com/
+https://www.reddit.com/
+https://x.com/

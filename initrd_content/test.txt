@@ -1,0 +1,10 @@
+Test File
+=========
+Etot fajl prednaznachen dlya testirovaniya
+fajlovoj sistemy InitRD.
+
+Proverka chteniya raznyh simvolov:
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+abcdefghijklmnopqrstuvwxyz
+0123456789
+!@#$%^&*()_+-=[]{}|;:,.<>?

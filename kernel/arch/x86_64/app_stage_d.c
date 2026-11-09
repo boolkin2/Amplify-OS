@@ -1,0 +1,70 @@
+// AMPLIFY-OS Pearl Stage D — Strata, Thread and Amplifier workspaces.
+#include "apps.h"
+#include "window.h"
+#include "wm.h"
+#include "graphics.h"
+#include "ui_theme.h"
+#include "ui_icons.h"
+#include "vfs.h"
+#include "fat32.h"
+#include "heap.h"
+#include "pmm.h"
+#include "task.h"
+#include "timer.h"
+#include "compositor.h"
+#include "keyboard.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+static int slen(const char*s){int n=0;while(s&&s[n])n++;return n;}
+static void scopy(char*d,const char*s,int cap){int i=0;for(;s&&i<cap-1&&s[i];i++)d[i]=s[i];d[i]=0;}
+static bool contains(const char*s,const char*q){if(!q[0])return true;for(int i=0;s[i];i++){int j=0;while(q[j]&&s[i+j]&&s[i+j]==q[j])j++;if(!q[j])return true;}return false;}
+static void txt(const gfx_target_t*t,int x,int y,const char*s,uint32_t c){gfx_draw_string_transparent(t,x,y,s,c);}
+static void bold(const gfx_target_t*t,int x,int y,const char*s,uint32_t c){txt(t,x,y,s,c);gfx_draw_string_transparent(t,x+1,y,s,c);}
+static void card(const gfx_target_t*t,int x,int y,int w,int h,uint32_t surface,uint32_t border){gfx_fill_round_rect(t,x,y,w,h,14,border);gfx_fill_round_rect(t,x+1,y+1,w-2,h-2,13,surface);}
+static void number(char*out,uint64_t v){char tmp[24];int n=0,i=0;if(!v)tmp[i++]='0';while(v){tmp[i++]='0'+v%10;v/=10;}while(i)out[n++]=tmp[--i];out[n]=0;}
+static void close_workspace(window_t*w){if(compositor_active()&&!compositor_is_animating(w))compositor_anim_close(w);else{w->visible=false;w->close_requested=true;}}
+static window_t* workspace(const char*title,window_draw_fn draw,window_click_fn click,window_key_fn key,void*state,bool dark){
+ const gfx_target_t*s=gfx_screen();int sw=s?s->width:1600,sh=s?s->height:1000,left=sw*64/1600,top=sh*48/1000;
+ window_t*w=window_create(title,left,top,sw-left,sh-top);if(!w)return 0;w->on_draw=draw;w->on_click=click;w->on_key=key;w->user_data=state;w->bg_color=dark?UI_DARK_CANVAS:UI_CANVAS;w->accent_color=UI_ACCENT_CORAL;window_set_chrome(w,WINDOW_CHROME_WORKSPACE);wm_add_window(w);return w;
+}
+
+// STRATA ---------------------------------------------------------------------
+#define SD_FILES 48
+#define SD_PREVIEW 1024
+typedef struct{char name[96];uint32_t size;uint8_t layer;}sd_file_t;
+typedef struct{sd_file_t files[SD_FILES];int count,selected;char preview[SD_PREVIEW];int plen;char search[32];int search_len;bool searching,confirm_delete;char status[64];}strata_t;
+static void strata_refresh(strata_t*s){s->count=0;s->selected=0;s->plen=0;for(int i=0;i<vfs_count()&&s->count<SD_FILES;i++){vfs_node_t*n=vfs_at(i);if(!n||!contains(n->name,s->search))continue;sd_file_t*f=&s->files[s->count++];scopy(f->name,n->name,sizeof(f->name));f->size=(uint32_t)n->size;f->layer=(n->name[0]=='/'&&n->name[1]=='d')?0:(n->name[0]=='/'&&n->name[1]=='u')?1:2;}scopy(s->status,s->count?"layers synchronized":"empty layer",sizeof(s->status));}
+static void strata_preview(strata_t*s){if(s->selected<0||s->selected>=s->count)return;int fd=vfs_open(s->files[s->selected].name);if(fd<0){scopy(s->status,"preview unavailable",64);return;}int64_t n=vfs_read(fd,s->preview,SD_PREVIEW-1);vfs_close(fd);if(n<0)n=0;s->plen=(int)n;s->preview[s->plen]=0;scopy(s->status,"preview loaded",64);}
+static void strata_create(strata_t*s){if(!fat32_is_mounted()){scopy(s->status,"Not saved - FAT32 unavailable",64);return;}int rc=fat32_mkdir_p("/disk/Sanctum/New Strata");scopy(s->status,rc==0?"New Strata created":"create failed",64);strata_refresh(s);}
+static void strata_rename(strata_t*s){
+    if(s->selected<0||s->selected>=s->count||!fat32_is_mounted()){scopy(s->status,"rename unavailable",64);return;}
+    const char*old=s->files[s->selected].name;
+    if(!(old[0]=='/'&&old[1]=='d'&&old[2]=='i'&&old[3]=='s'&&old[4]=='k')){scopy(s->status,"only disk files can be renamed",64);return;}
+    char data[4096];int fd=vfs_open(old);if(fd<0){scopy(s->status,"rename read failed",64);return;}int64_t n=vfs_read(fd,data,sizeof(data));vfs_close(fd);if(n<0){scopy(s->status,"rename read failed",64);return;}
+    const char*next="/disk/Sanctum/renamed-item.txt";if(fat32_save_file(next,data,(uint64_t)n)<0||fat32_delete_file(old)!=0){scopy(s->status,"rename failed",64);return;}strata_refresh(s);scopy(s->status,"renamed to renamed-item.txt",64);
+}
+static void strata_delete(strata_t*s){if(s->selected<0||s->selected>=s->count)return;if(!s->confirm_delete){s->confirm_delete=true;scopy(s->status,"Press D again to confirm delete",64);return;}int rc=fat32_delete_file(s->files[s->selected].name);s->confirm_delete=false;scopy(s->status,rc==0?"deleted":"delete failed",64);strata_refresh(s);}
+static void strata_draw(window_t*w,const gfx_target_t*t){strata_t*s=w->user_data;const ui_runtime_theme_t*th=ui_theme_current();gfx_clear(t,th->canvas);txt(t,78,28,"STRATA - FILE LAYERS",th->muted);bold(t,78,54,"Strata",th->ink);txt(t,w->width-390,34,s->searching?"SEARCH ACTIVE":"layers   flow   lens",th->muted);if(s->searching){card(t,430,22,320,34,th->surface,th->border);txt(t,446,31,s->search,th->ink);}
+ const char*groups[3]={"Warm - working layer","Shared - with Prism team","Cold - archived strata"};int gy[3]={112,325,538};for(int g=0;g<3;g++){card(t,78,gy[g],w->width-430,188,th->surface,th->border);bold(t,102,gy[g]+24,groups[g],th->ink);int col=0;for(int i=0;i<s->count&&col<5;i++)if(s->files[i].layer==g){int x=102+col*185,y=gy[g]+62;card(t,x,y,168,96,i==s->selected?th->surface_soft:th->surface,i==s->selected?th->accent_coral:th->border);ui_draw_bitmap_scaled(t,x+16,y+14,24,24,ui_icon(UI_ICON_FILES));char nm[21];int k=0;const char*p=s->files[i].name;for(;p[k]&&k<20;k++)nm[k]=p[k];nm[k]=0;bold(t,x+16,y+58,nm,th->ink);col++;}}
+ int ix=w->width-326;card(t,ix,66,286,w->height-116,th->surface,th->border);txt(t,ix+24,92,"LENS",th->muted);gfx_fill_rect_gradient(t,ix+24,126,238,150,th->accent_orange,th->accent_berry);ui_draw_bitmap_scaled(t,ix+105,178,48,48,ui_icon(UI_ICON_FILES));if(s->count){bold(t,ix+24,300,s->files[s->selected].name,th->ink);char sz[24];number(sz,s->files[s->selected].size);txt(t,ix+24,328,sz,th->muted);}txt(t,ix+24,370,s->plen?s->preview:"Enter opens preview",th->muted);txt(t,78,w->height-36,"Arrows select  Enter preview  / search  N folder  M rename  D delete  R refresh",th->muted);txt(t,820,w->height-36,s->status,th->accent_berry);}
+static void strata_key(window_t*w,char c){strata_t*s=w->user_data;if(c==27){if(s->searching){s->searching=false;return;}close_workspace(w);return;}if(s->searching){if(c=='\n'){s->searching=false;strata_refresh(s);}else if(c=='\b'&&s->search_len)s->search[--s->search_len]=0;else if(c>=32&&c<127&&s->search_len<31){s->search[s->search_len++]=c;s->search[s->search_len]=0;}return;}if(c=='/'){s->searching=true;return;}if(c==KBD_KEY_LEFT||c==KBD_KEY_UP)s->selected=s->count?(s->selected+s->count-1)%s->count:0;else if(c==KBD_KEY_RIGHT||c==KBD_KEY_DOWN||c=='\t')s->selected=s->count?(s->selected+1)%s->count:0;else if(c=='\n')strata_preview(s);else if(c=='n'||c=='N')strata_create(s);else if(c=='m'||c=='M')strata_rename(s);else if(c=='d'||c=='D')strata_delete(s);else if(c=='r'||c=='R')strata_refresh(s);}
+static void strata_click(window_t*w,int x,int y){strata_t*s=w->user_data;for(int g=0;g<3;g++){int gy=112+g*213,col=0;for(int i=0;i<s->count&&col<5;i++)if(s->files[i].layer==g){int cx=102+col*185;if(x>=cx&&x<cx+168&&y>=gy+62&&y<gy+158){s->selected=i;strata_preview(s);return;}col++;}}}
+window_t* app_strata_open(void){strata_t*s=kmalloc(sizeof(*s));if(!s)return 0;s->search[0]=0;s->search_len=0;s->searching=false;s->confirm_delete=false;strata_refresh(s);window_t*w=workspace("Strata",strata_draw,strata_click,strata_key,s,false);if(!w)kfree(s);return w;}
+
+// THREAD ---------------------------------------------------------------------
+#define THREAD_BUF 4096
+#define THREAD_PATH "/disk/Sanctum/notes/thread.txt"
+typedef struct{char text[THREAD_BUF];int len;bool dirty,pinned;char search[32];int search_len;bool searching;char status[48];uint64_t last_edit;}thread_t;
+static void thread_save(thread_t*s){if(!fat32_is_mounted()){scopy(s->status,"Not saved - RAM only",48);return;}fat32_mkdir_p("/disk/Sanctum/notes");int64_t r=fat32_save_file(THREAD_PATH,s->text,s->len);s->dirty=r<0;scopy(s->status,r>=0?"saved":"save failed",48);}
+static void thread_draw(window_t*w,const gfx_target_t*t){thread_t*s=w->user_data;const ui_runtime_theme_t*th=ui_theme_current();gfx_clear(t,th->canvas);txt(t,78,28,"THREAD - ONE CONTINUOUS NOTE",th->muted);bold(t,78,54,"Thread",th->ink);txt(t,214,58,s->pinned?"PINNED":"TODAY",th->accent_berry);int x=112,y=112,ww=w->width-560;card(t,x,y,ww,w->height-156,th->surface,th->border);txt(t,x+28,y+24,"CURRENT ANCHOR",th->muted);bold(t,x+28,y+52,"The shell is a single surface",th->ink);int cx=x+28,cy=y+88,col=0,cols=(ww-56)/8;for(int i=0;i<s->len&&cy<y+w->height-220;i++){char c=s->text[i];if(c=='\n'||col>=cols){cy+=18;cx=x+28;col=0;if(c=='\n')continue;}char one[2]={c,0};txt(t,cx,cy,one,th->muted);cx+=8;col++;}if(((timer_get_uptime_ms()/530)&1)==0)gfx_fill_rect(t,cx,cy,2,16,th->accent_coral);
+ int rx=w->width-410;card(t,rx,112,350,205,th->surface,th->border);txt(t,rx+26,138,"FACETS IN THIS THREAD",th->muted);txt(t,rx+26,178,"shell    ring    grammar    open",th->ink);bold(t,rx+26,232,"anchors                         4",th->ink);bold(t,rx+26,260,"words                         612",th->ink);card(t,rx,340,350,176,th->surface,th->border);txt(t,rx+26,366,"NEXT ANCHOR",th->muted);txt(t,rx+26,402,"Start typing anywhere - the thread grows.",th->muted);card(t,rx,540,350,190,th->surface,th->border);txt(t,rx+26,566,"THREADS NEARBY",th->muted);bold(t,rx+26,604,"Icon grammar",th->ink);bold(t,rx+26,642,"Launch arc",th->ink);bold(t,rx+26,680,"Mesh handoff notes",th->ink);txt(t,78,w->height-34,"Ctrl+S save  Ctrl+F search  Ctrl+P pin  Esc back",th->muted);txt(t,480,w->height-34,s->status,th->accent_berry);if(s->dirty&&timer_get_uptime_ms()-s->last_edit>1500)thread_save(s);}
+static void thread_key(window_t*w,char c){thread_t*s=w->user_data;if(c==27){if(s->dirty)thread_save(s);close_workspace(w);return;}if(c==19){thread_save(s);return;}if(c==16){s->pinned=!s->pinned;return;}if(c==6){s->searching=true;s->search_len=0;s->search[0]=0;scopy(s->status,"search: type query + Enter",48);return;}if(s->searching){if(c=='\n'){s->searching=false;scopy(s->status,contains(s->text,s->search)?"match found":"no match",48);}else if(c=='\b'&&s->search_len)s->search[--s->search_len]=0;else if(c>=32&&c<127&&s->search_len<31){s->search[s->search_len++]=c;s->search[s->search_len]=0;}return;}if(c=='\b'&&s->len)s->text[--s->len]=0;else if((c=='\n'||(c>=32&&c<127))&&s->len<THREAD_BUF-1){s->text[s->len++]=c;s->text[s->len]=0;}else return;s->dirty=true;s->last_edit=timer_get_uptime_ms();scopy(s->status,"editing - autosave",48);}
+window_t* app_thread_open(void){thread_t*s=kmalloc(sizeof(*s));if(!s)return 0;s->len=0;s->dirty=false;s->pinned=true;s->searching=false;s->last_edit=0;int64_t n=fat32_read_file(THREAD_PATH,s->text,THREAD_BUF-1);if(n>0)s->len=n;else{const char*g="No windows, no stacking. Panels are prisms that dock along the vector rail.\n\nRing beats menus. Every app lives on the apex ring.\n\nChamfer = state. A cut corner means the surface is live.\n";while(*g&&s->len<THREAD_BUF-1)s->text[s->len++]=*g++;}s->text[s->len]=0;scopy(s->status,fat32_is_mounted()?"autosave ready":"Not saved - RAM only",48);window_t*w=workspace("Thread",thread_draw,0,thread_key,s,false);if(!w)kfree(s);return w;}
+
+// AMPLIFIER ------------------------------------------------------------------
+static void tri_metric(const gfx_target_t*t,int cx,int top,int size,const char*value,const char*label){for(int y=0;y<size;y++){int half=y*size/(size*2);int x0=cx-half,x1=cx+half;uint32_t c=y>size*2/3?ui_sunset((uint8_t)(y*255/size)):0xFF403844;gfx_fill_rect(t,x0,top+y,x1-x0+1,1,c);}bold(t,cx-slen(value)*4,top+size*2/3,value,UI_DARK_TEXT);txt(t,cx-slen(label)*4,top+size+14,label,0xFFA99FAA);}
+static void amplifier_draw(window_t*w,const gfx_target_t*t){(void)w;gfx_clear(t,UI_DARK_CANVAS);txt(t,78,28,"AMPLIFIER - CORE HEALTH",0xFFA99FAA);bold(t,78,56,"All systems nominal",UI_DARK_TEXT);txt(t,78,96,"Live scheduler, memory and prism telemetry.",0xFFA99FAA);pmm_stats_t ps=pmm_get_stats();heap_stats_t hs=heap_get_stats();uint64_t total=ps.used_pages+ps.free_pages;char ram[24],heapb[24],tasks[24];number(ram,total?ps.used_pages*100/total:0);number(heapb,hs.used_size/1024);number(tasks,task_count());card(t,78,154,800,490,0xFF211923,0xFF352A36);txt(t,112,190,"LIVE PRISM LOAD",0xFFA99FAA);tri_metric(t,240,230,190,ram,"CORE %");tri_metric(t,500,230,190,heapb,"MEMORY KB");tri_metric(t,760,230,190,tasks,"PRISMS");gfx_fill_rect(t,112,480,730,1,0xFF403844);char up[24];number(up,timer_get_uptime_ms()/1000);bold(t,112,520,"UPTIME",0xFFA99FAA);bold(t,112,548,up,UI_DARK_TEXT);bold(t,330,520,"IGNITION",0xFFA99FAA);bold(t,330,548,"1.9 s",UI_DARK_TEXT);bold(t,548,520,"SEALED PRISMS",0xFFA99FAA);bold(t,548,548,tasks,UI_DARK_TEXT);card(t,910,154,w->width-950,244,0xFF211923,0xFF352A36);txt(t,940,190,"CORE UPDATE",0xFFA99FAA);bold(t,940,232,"CHRT core 1.0.3",UI_DARK_TEXT);txt(t,940,272,"Faster ring arcs, calmer signals, safer strata.",0xFFA99FAA);gfx_fill_rect_gradient(t,940,326,w->width-1010,46,UI_ACCENT_ORANGE,UI_ACCENT_MAGENTA);bold(t,w->width-260,341,"AMPLIFY NOW",UI_DARK_TEXT);card(t,910,420,w->width-950,224,0xFF211923,0xFF352A36);txt(t,940,454,"LAST 7 TURNS",0xFFA99FAA);for(int i=0;i<7;i++){int h=36+((i*37+21)%72);gfx_fill_rect_gradient(t,940+i*72,570-h,54,h,UI_ACCENT_ORANGE,UI_ACCENT_MAGENTA);}card(t,78,676,w->width-118,178,0xFF211923,0xFF352A36);txt(t,112,710,"PRISM BY PRISM",0xFFA99FAA);int y=750;for(task_t*tk=task_iterate(0);tk&&y<830;tk=task_iterate(tk)){char id[12];number(id,tk->tid);txt(t,112,y,id,UI_DARK_TEXT);txt(t,160,y,task_state_name(tk->state),0xFFA99FAA);gfx_fill_rect_gradient(t,290,y+5,420,6,UI_ACCENT_ORANGE,UI_ACCENT_MAGENTA);y+=24;}txt(t,78,w->height-34,"Live data - Esc returns to Apex",0xFFA99FAA);}
+static void amplifier_key(window_t*w,char c){if(c==27)close_workspace(w);}
+window_t* app_amplifier_open(void){return workspace("Amplifier",amplifier_draw,0,amplifier_key,0,true);}

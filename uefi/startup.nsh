@@ -1,0 +1,3 @@
+@echo -off
+echo Starting AMPLIFY-OS UEFI loader...
+fs0:\EFI\BOOT\BOOTX64.EFI

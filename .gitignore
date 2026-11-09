@@ -1,0 +1,41 @@
+# .gitignore для MyOS
+
+# Скомпилированные файлы
+*.o
+*.bin
+*.elf
+*.iso
+*.img
+
+# Директории сборки
+build/
+iso/
+
+# Временные файлы
+*.tmp
+*.swp
+*.swo
+*~
+
+# Отладочные файлы
+*.log
+*.out
+
+# IDE файлы
+.vscode/
+.idea/
+*.sublime-*
+
+# OS файлы
+.DS_Store
+Thumbs.db
+
+# Backup файлы
+*.bak
+*.backup
+
+# Снимки экрана QEMU и прочие артефакты прогонов
+*.ppm
+*.qcow2
+*.raw
+node_modules/

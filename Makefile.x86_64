@@ -1,0 +1,1168 @@
+# ============================================================================
+# Makefile.x86_64 — сборка 64-битного скелета AMPLIFY-OS (этап 37.1).
+# ----------------------------------------------------------------------------
+# Подключается из главного Makefile при ARCH=x86_64. Изолированный набор
+# исходников, флагов и QEMU-целей. НЕ ТРОГАЕТ i386-путь.
+# ============================================================================
+
+# Явно: default goal = all (иначе make подцепит первое явное правило, которое
+# окажется $(USER_BUILD)/hello.o из секции userspace ниже).
+.DEFAULT_GOAL := all
+
+ASM       := nasm
+CC        := gcc
+LD        := ld
+QEMU      := qemu-system-x86_64
+GRUB_MKR  := grub-mkrescue
+GRUB_PC_DIR := /usr/lib/grub/i386-pc
+
+BUILD_DIR := build/x86_64
+ISO_DIR   := build/iso-x86_64
+KERNEL    := build/kernel-x86_64.bin
+ISO       := build/myos-x86_64.iso
+# Этап 57: BOOTEFI объявлен здесь, а не рядом с целью esp, потому что его
+# использует список prerequisite'ов initrd (payload установщика).  Список
+# prerequisite'ов раскрывается в момент чтения правила — переменная,
+# объявленная ниже по файлу, в нём оказалась бы пустой (см. CLAUDE.md §14.13).
+BOOTEFI   := build/uefi/BOOTX64.EFI
+
+# x86_64 freestanding флаги.
+# -mno-red-zone   — обязательно для kernel-mode (иначе исключение нарушит данные).
+# -mcmodel=kernel — эффективные адреса в верхней half (хотя пока линкуем в нижнюю).
+# [этап 44] -mmmx -msse -msse2 НЕ выключаем: ядро теперь включает FPU+SSE
+#                 в boot.asm (CR4.OSFXSR | CR4.OSXMMEXCPT, FNINIT, LDMXCSR),
+#                 а task_yield + isr_common + syscall_entry делают FXSAVE/
+#                 FXRSTOR.  GCC свободен использовать xmm регистры в любых
+#                 файлах ядра, включая 3D-рендер GLES.
+# -finput-charset=UTF-8 -fexec-charset=CP1251 — исходники у нас в UTF-8 (так удобно
+#   редактировать), но во время компиляции GCC перекодирует все строковые
+#   литералы в CP1251 (по 1 байту на символ), чтобы 8×16 bitmap-шрифт мог
+#   рисовать кириллицу напрямую через индексирование по байту.  Этот же
+#   приём уже используется в основном Makefile (i386), здесь его не хватало.
+ARCH_CFLAGS = -m64 -ffreestanding -fno-stack-protector -fno-pie \
+               -mno-red-zone -mcmodel=kernel \
+               -nostdlib -fno-builtin -Wall -Wextra -O2 \
+               -finput-charset=UTF-8 -fexec-charset=CP1251 \
+               -Ikernel $(HH_CFLAGS) $(CFLAGS_EXTRA)
+
+ARCH_ASMFLAGS := -felf64
+
+# ----------------------------------------------------------------------------
+# [38.1.1] Раскладка ядра.
+#   HIGHER_HALF=1 (по умолчанию) — ядро слинковано в верхней половине адресов
+#       (linker_x86_64.ld, boot.asm), загрузчик UEFI кладёт его куда угодно.
+#   HIGHER_HALF=0 — прежняя раскладка: ядро по физическому адресу 1 МБ
+#       (linker_x86_64_low.ld, boot_low.asm). Оставлена как путь отката до
+#       конца подэтапа 38.1. Переключение — ТОЛЬКО с чистой сборкой
+#       (rm -rf build/x86_64/kernel): объектные файлы у раскладок разные.
+#
+# KERNEL_END_LIMIT — предел конца образа в адресах ЗАГРУЗКИ (см. правило
+# $(KERNEL)); 0 — не проверять.
+#   нижняя раскладка: 0x800000 — с этого адреса у OVMF лежит ACPI NVS;
+#   верхняя: 0x1000000 — у пути UEFI стены больше нет, но GRUB по-прежнему
+#       кладёт ядро с 1 МБ, а с 16 МБ начинается куча ядра (до 38.1.3).
+# ----------------------------------------------------------------------------
+HIGHER_HALF ?= 1
+ifeq ($(HIGHER_HALF),1)
+HH_CFLAGS        := -DAOS_HIGHER_HALF=1
+KERNEL_LDSCRIPT  := linker_x86_64.ld
+KERNEL_BOOT_ASM  := kernel/arch/x86_64/boot.asm
+KERNEL_END_SYM   := _kernel_end_lma
+KERNEL_END_LIMIT ?= 0x1000000
+else
+HH_CFLAGS        :=
+KERNEL_LDSCRIPT  := linker_x86_64_low.ld
+KERNEL_BOOT_ASM  := kernel/arch/x86_64/boot_low.asm
+KERNEL_END_SYM   := _kernel_end
+KERNEL_END_LIMIT ?= 0x800000
+endif
+
+ARCH_LDFLAGS  := -m elf_x86_64 -nostdlib -static \
+                 -T $(KERNEL_LDSCRIPT) -z max-page-size=0x1000
+
+# Источники.
+ASM_SRC := \
+    $(KERNEL_BOOT_ASM) \
+    kernel/arch/x86_64/gdt_flush.asm \
+    kernel/arch/x86_64/idt_flush.asm \
+    kernel/arch/x86_64/isr.asm \
+    kernel/arch/x86_64/smp_trampoline.asm \
+    kernel/arch/x86_64/vmx_entry.asm \
+    kernel/arch/x86_64/phantom_guest.asm \
+    kernel/arch/x86_64/phantom_bios_rom.asm \
+    kernel/arch/x86_64/syscall_entry.asm \
+    kernel/arch/x86_64/user_mode.asm \
+    kernel/arch/x86_64/user_test.asm \
+    kernel/arch/x86_64/task_switch.asm
+
+C_SRC := \
+    kernel/arch/x86_64/multiboot2.c \
+    kernel/arch/x86_64/serial.c \
+    kernel/arch/x86_64/ui_font.c \
+    kernel/arch/x86_64/ui_font_data.c \
+    kernel/arch/x86_64/fb.c \
+    kernel/arch/x86_64/gdt.c \
+    kernel/arch/x86_64/idt.c \
+    kernel/arch/x86_64/interrupt.c \
+    kernel/arch/x86_64/pic.c \
+    kernel/arch/x86_64/pit.c \
+    kernel/arch/x86_64/pmm.c \
+    kernel/arch/x86_64/heap.c \
+    kernel/arch/x86_64/paging.c \
+    kernel/arch/x86_64/cpu.c \
+    kernel/arch/x86_64/cpu_stats.c \
+    kernel/arch/x86_64/acpi.c \
+    kernel/arch/x86_64/lapic.c \
+    kernel/arch/x86_64/ioapic.c \
+    kernel/arch/x86_64/smp.c \
+    kernel/arch/x86_64/smp_pool.c \
+    kernel/arch/x86_64/vmx.c \
+    kernel/arch/x86_64/hv.c \
+    kernel/arch/x86_64/phantom.c \
+    kernel/arch/x86_64/phantom_pc.c \
+    kernel/arch/x86_64/phantom_linux.c \
+    kernel/arch/x86_64/phantom_bios.c \
+    kernel/arch/x86_64/phantom_font_data.c \
+    kernel/arch/x86_64/app_phantom.c \
+    kernel/arch/x86_64/app_rune.c \
+    kernel/arch/x86_64/wasm_bin.c \
+    kernel/arch/x86_64/wasm_valid.c \
+    kernel/arch/x86_64/wasm_rt.c \
+    kernel/arch/x86_64/wasm_interp.c \
+    kernel/arch/x86_64/wasm_jit.c \
+    kernel/arch/x86_64/wasm_wasi.c \
+    kernel/arch/x86_64/wasm_spec.c \
+    kernel/arch/x86_64/rune.c \
+    kernel/arch/x86_64/syscall.c \
+    kernel/arch/x86_64/vm.c \
+    kernel/arch/x86_64/elf.c \
+    kernel/arch/x86_64/task.c \
+    kernel/arch/x86_64/vfs.c \
+    kernel/arch/x86_64/initrd.c \
+    kernel/arch/x86_64/ata.c \
+    kernel/arch/x86_64/ahci.c \
+    kernel/arch/x86_64/iso9660.c \
+    kernel/arch/x86_64/disk_io.c \
+    kernel/arch/x86_64/blkcrypt.c \
+    kernel/arch/x86_64/luks.c \
+    kernel/arch/x86_64/fde.c \
+    kernel/arch/x86_64/fde_unlock.c \
+    kernel/arch/x86_64/partition.c \
+    kernel/arch/x86_64/fat32.c \
+    kernel/arch/x86_64/fat32_mkfs.c \
+    kernel/arch/x86_64/installer_engine.c \
+    kernel/arch/x86_64/installer.c \
+    kernel/arch/x86_64/pci.c \
+    kernel/arch/x86_64/netif.c \
+    kernel/arch/x86_64/ethernet.c \
+    kernel/arch/x86_64/arp.c \
+    kernel/arch/x86_64/ipv4.c \
+    kernel/arch/x86_64/icmp.c \
+    kernel/arch/x86_64/udp.c \
+    kernel/arch/x86_64/tcp.c \
+    kernel/arch/x86_64/dhcp.c \
+    kernel/arch/x86_64/netcfg.c \
+    kernel/arch/x86_64/dns.c \
+    kernel/arch/x86_64/rtl8139.c \
+    kernel/arch/x86_64/e1000.c \
+    kernel/arch/x86_64/ac97.c \
+    kernel/arch/x86_64/pipe.c \
+    kernel/arch/x86_64/signal.c \
+    kernel/arch/x86_64/sig.c \
+    kernel/arch/x86_64/sock.c \
+    kernel/arch/x86_64/futex.c \
+    kernel/arch/x86_64/dynlink.c \
+    kernel/arch/x86_64/unix_socket.c \
+    kernel/arch/x86_64/shm.c \
+    kernel/arch/x86_64/swap.c \
+    kernel/arch/x86_64/keyboard.c \
+    kernel/arch/x86_64/shell.c \
+    kernel/arch/x86_64/gui.c \
+    kernel/arch/x86_64/mouse.c \
+    kernel/arch/x86_64/timer.c \
+    kernel/arch/x86_64/rtc.c \
+    kernel/arch/x86_64/speaker.c \
+    kernel/arch/x86_64/power.c \
+    kernel/arch/x86_64/audio.c \
+    kernel/arch/x86_64/http.c \
+    kernel/arch/x86_64/inflate.c \
+    kernel/arch/x86_64/cookies.c \
+    kernel/arch/x86_64/login.c \
+    kernel/arch/x86_64/graphics.c \
+    kernel/arch/x86_64/doublebuf.c \
+    kernel/arch/x86_64/window.c \
+    kernel/arch/x86_64/cursor.c \
+    kernel/arch/x86_64/wm.c \
+    kernel/arch/x86_64/framestat.c \
+    kernel/arch/x86_64/desktop.c \
+    kernel/arch/x86_64/ui_layout.c \
+    kernel/arch/x86_64/ui_theme.c \
+    kernel/arch/x86_64/ui_components.c \
+    kernel/arch/x86_64/ui_motion.c \
+    kernel/arch/x86_64/ui_overlay.c \
+    kernel/arch/x86_64/beacon.c \
+    kernel/arch/x86_64/constellation.c \
+    kernel/arch/x86_64/ui_icons.c \
+    kernel/arch/x86_64/ui_icon_rune.c \
+    kernel/arch/x86_64/apps.c \
+    kernel/arch/x86_64/app_stage_d.c \
+    kernel/arch/x86_64/app_stage_e.c \
+    kernel/arch/x86_64/app_signal.c \
+    kernel/arch/x86_64/app_arc.c \
+    kernel/arch/x86_64/app_resonance.c \
+    kernel/arch/x86_64/app_core.c \
+    kernel/arch/x86_64/app_facet.c \
+    kernel/arch/x86_64/app_mesh.c \
+    kernel/arch/x86_64/app_browser.c \
+    kernel/arch/x86_64/ui_kit.c \
+    kernel/arch/x86_64/ui_fx.c \
+    kernel/arch/x86_64/app_capacity.c \
+    kernel/arch/x86_64/users.c \
+    kernel/arch/x86_64/firstboot.c \
+    kernel/arch/x86_64/splash.c \
+    kernel/arch/x86_64/virtio.c \
+    kernel/arch/x86_64/virtio_gpu.c \
+    kernel/arch/x86_64/virtio_input.c \
+    kernel/arch/x86_64/virtio_blk.c \
+    kernel/arch/x86_64/virtio_net.c \
+    kernel/arch/x86_64/drm.c \
+    kernel/arch/x86_64/compositor.c \
+    kernel/arch/x86_64/gles_math.c \
+    kernel/arch/x86_64/gles.c \
+    kernel/arch/x86_64/app_glcube.c \
+    kernel/arch/x86_64/amply.c \
+    kernel/arch/x86_64/ns.c \
+    kernel/arch/x86_64/cgroup.c \
+    kernel/arch/x86_64/seccomp.c \
+    kernel/arch/x86_64/box.c \
+    kernel/arch/x86_64/app_box.c \
+    kernel/arch/x86_64/crypto_cpu.c \
+    kernel/arch/x86_64/crypto_sha.c \
+    kernel/arch/x86_64/crypto_hmac.c \
+    kernel/arch/x86_64/crypto_aes.c \
+    kernel/arch/x86_64/crypto_chacha.c \
+    kernel/arch/x86_64/crypto_rand.c \
+    kernel/arch/x86_64/crypto_self_test.c \
+    kernel/arch/x86_64/crypto_bn.c \
+    kernel/arch/x86_64/crypto_rsa.c \
+    kernel/arch/x86_64/crypto_curve.c \
+    kernel/arch/x86_64/crypto_p256.c \
+    kernel/arch/x86_64/crypto_p384.c \
+    kernel/arch/x86_64/crypto_asn1.c \
+    kernel/arch/x86_64/crypto_x509.c \
+    kernel/arch/x86_64/crypto_ca.c \
+    kernel/arch/x86_64/crypto_ca_blob.c \
+    kernel/arch/x86_64/tls.c \
+    kernel/arch/x86_64/https.c \
+    kernel/arch/x86_64/mind_gguf.c \
+    kernel/arch/x86_64/mind_math.c \
+    kernel/arch/x86_64/mind_model.c \
+    kernel/arch/x86_64/mind_tok.c \
+    kernel/arch/x86_64/mind_chat.c \
+    kernel/arch/x86_64/mind_tools.c \
+    kernel/arch/x86_64/mind.c \
+    kernel/arch/x86_64/mind_widget.c \
+    kernel/kernel64_main.c
+
+ASM_OBJ := $(patsubst %.asm,$(BUILD_DIR)/%.o,$(ASM_SRC))
+C_OBJ   := $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SRC))
+
+# ----------------------------------------------------------------------------
+# Этап 37.4b: userspace x86_64 — мини ELF-программа hello,
+# линкуется отдельно, потом встраивается в kernel через objcopy --binary
+# (получаются символы _binary_hello_elf_start / _end / _size).
+# ----------------------------------------------------------------------------
+USER_DIR     := userspace/x86_64
+USER_BUILD   := $(BUILD_DIR)/userspace
+USER_HELLO   := $(USER_BUILD)/hello.elf
+USER_BLOB    := $(USER_BUILD)/hello_blob.o
+USER_COUNTER := $(USER_BUILD)/counter.elf
+USER_COUNTER_BLOB := $(USER_BUILD)/counter_blob.o
+
+# Общий шаблон: <name>.asm → <name>.o → <name>.elf → <name>_blob.o
+$(USER_BUILD)/%.o: $(USER_DIR)/%.asm
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)NASM   $<  (user ELF)$(NC)"
+	@$(ASM) -felf64 $< -o $@
+
+$(USER_HELLO): $(USER_BUILD)/hello.o $(USER_DIR)/user.ld
+	@echo "$(YELLOW)LD     $@$(NC)"
+	@$(LD) -nostdlib -static -T $(USER_DIR)/user.ld -z max-page-size=0x1000 \
+	       $(USER_BUILD)/hello.o -o $@
+
+$(USER_COUNTER): $(USER_BUILD)/counter.o $(USER_DIR)/user.ld
+	@echo "$(YELLOW)LD     $@$(NC)"
+	@$(LD) -nostdlib -static -T $(USER_DIR)/user.ld -z max-page-size=0x1000 \
+	       $(USER_BUILD)/counter.o -o $@
+
+$(USER_BLOB): $(USER_HELLO)
+	@echo "$(YELLOW)OBJCOPY  $<  -> hello blob$(NC)"
+	@objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_HELLO)))_start=user_hello_elf_start \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_HELLO)))_end=user_hello_elf_end \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_HELLO)))_size=user_hello_elf_size \
+	         $< $@
+
+$(USER_COUNTER_BLOB): $(USER_COUNTER)
+	@echo "$(YELLOW)OBJCOPY  $<  -> counter blob$(NC)"
+	@objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_COUNTER)))_start=user_counter_elf_start \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_COUNTER)))_end=user_counter_elf_end \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_COUNTER)))_size=user_counter_elf_size \
+	         $< $@
+
+# ----------------------------------------------------------------------------
+# Этап 37.5a: initrd-x86_64.img — RAM-disk с user ELF'ами,
+# собирается host-утилитой mkinitrd (тот же бинарь, что для i386).
+# Формат: magic "MYOS" + headers + raw данные. См. tools/mkinitrd.c.
+# ----------------------------------------------------------------------------
+INITRD_IMG     := build/initrd-x86_64.img
+MKINITRD_HOST  := build/mkinitrd
+
+# Этап 40 группа F: 6 мигрированных legacy-программ должны быть объявлены
+# ДО INITRD_FILES, чтобы их prerequisites корректно попали в initrd.
+USER_MIGRATED := stage40_hello stage40_elftest stage40_forktest \
+                 stage40_exectest stage40_cwdtest stage40_shmtest
+USER_MIGRATED_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_MIGRATED)))
+
+# Этап 41: GPU property-test ELF в initrd.
+USER_STAGE41 := stage41_gputest
+USER_STAGE41_ELFS := $(addprefix $(USER_BUILD)/,$(addsuffix .elf,$(USER_STAGE41)))
+
+USER_HELLO_LIBC := $(USER_BUILD)/hello_libc.elf
+# Явный immediate-путь к libc.so. Должен совпадать с $(SYSROOT_LIB)/libc.so,
+# который объявляется ниже. Дублирование сделано осознанно: переменная
+# нужна сейчас, чтобы Make включил libc.so в граф зависимостей INITRD_FILES.
+LIBC_SO_PATH    := build/sysroot/usr/lib/libc.so
+
+# Этап 49: встроенная модель AMPLIFY MIND (stories260K, 1.1 МБ, MIT —
+# llama2.c/ggml-org). Нужна smoke-тесту и как запасная модель, если в
+# /disk/vault/mind нет своей .gguf.
+MIND_BUILTIN    := assets/mind/stories260K.gguf
+
+# [51.4] Встроенные программы WebAssembly для окна Rune (oracle, abacus, sieve,
+# scribe). Компилятора в wasm нет ни в WSL, ни в Windows — только на узле,
+# поэтому готовые модули ЛЕЖАТ В ДЕРЕВЕ (userspace/wasm/dist) и попадают в
+# initrd как обычные файлы: ядро на ПК собирается с теми же программами, что
+# и на узле. Обновить их из исходников — `make wasm-dist` на узле и забрать
+# каталог на ПК (scripts/pve_wasm_dist.sh); тест 51.4 сверяет dist со свежей
+# сборкой побайтно.
+RUNE_BUILTIN    := oracle abacus sieve scribe
+RUNE_DIST_DIR   := userspace/wasm/dist
+RUNE_DIST_FILES := $(wildcard $(RUNE_DIST_DIR)/*.wasm)
+
+INITRD_FILES    = $(USER_HELLO) $(USER_COUNTER) $(USER_HELLO_LIBC) \
+                  $(USER_MIGRATED_ELFS) $(USER_STAGE41_ELFS) $(LIBC_SO_PATH) \
+                  $(AMPLY_AMF_FILES) $(AMPLY_INDEX) $(MIND_BUILTIN) \
+                  $(RUNE_DIST_FILES) \
+                  $(KERNEL) $(BOOTEFI)
+
+$(MKINITRD_HOST): tools/mkinitrd.c
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)HOST-CC  mkinitrd$(NC)"
+	@gcc -O2 -Wall -o $@ $< 2>/dev/null
+
+# ----------------------------------------------------------------------------
+# Этап 51: движок WebAssembly, собранный на хосте, — те же исходники, что в
+# ядре, с обычной libc вокруг. Гоняет официальный набор тестов (wasm-host спек
+# — build/wasm_host spec build/wasm/spec.pack) и показывает, что в модуле.
+# -fno-builtin и -ffreestanding здесь НЕ ставим намеренно: файлы движка обязаны
+# собираться и так, и так.
+# ----------------------------------------------------------------------------
+WASM_HOST     := build/wasm_host
+WASM_ENGINE   := kernel/arch/x86_64/wasm_bin.c kernel/arch/x86_64/wasm_valid.c \
+                 kernel/arch/x86_64/wasm_rt.c kernel/arch/x86_64/wasm_interp.c \
+                 kernel/arch/x86_64/wasm_jit.c kernel/arch/x86_64/wasm_wasi.c \
+                 kernel/arch/x86_64/wasm_spec.c
+
+wasm-host: $(WASM_HOST)
+
+$(WASM_HOST): tools/wasm_host.c $(WASM_ENGINE) kernel/arch/x86_64/wasm.h kernel/arch/x86_64/wasm_int.h kernel/arch/x86_64/wasm_wasi.h
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)HOST-CC  wasm_host$(NC)"
+	@gcc -O2 -Wall -Wextra -o $@ tools/wasm_host.c $(WASM_ENGINE)
+
+# Та же утилита под санитайзерами — для `fuzz`: чтение за границей буфера или
+# неопределённое поведение останавливают её с отчётом. Нужна libasan (на узле
+# есть не всегда; тест без неё пишет SKIP).
+# Проверочные программы на C -> WebAssembly (userspace/wasm/*.c). Нужен clang с
+# целью wasm32-wasi; он есть только на узле (scripts/pve_wasm_tools.sh), поэтому
+# цель не входит в `all`: без неё ядро собирается как раньше, а тесты этапа 51
+# пишут SKIP там, где нужны настоящие программы. Каждая программа собирается
+# трижды — без оптимизации, с -O2 и с -O2 и всеми расширениями 2.0, — чтобы
+# движок видел разный код одного и того же смысла; рядом кладётся сборка для
+# хоста (.host): её вывод — эталон для вывода модуля.
+WASI_CLANG    ?= $(HOME)/local/usr/lib/llvm-19/bin/clang
+WASI_SYSROOT  ?= $(HOME)/local/usr
+WASM_APPS_DIR := build/wasm/apps
+WASM_APP_SRCS := $(wildcard userspace/wasm/*.c)
+WASI_CC       := $(WASI_CLANG) --target=wasm32-wasi --sysroot=$(WASI_SYSROOT)
+WASI_FEATURES := -mbulk-memory -mnontrapping-fptoint -msign-ext -mmultivalue -mreference-types -mmutable-globals
+# [51.1] Модуль без окружения (userspace/wasm/pure): ничего не импортирует, функции
+# вызываются по именам экспорта. Без libc и без точки входа.
+PURE_SRC      := userspace/wasm/pure/pure.c
+PURE_CC       := $(WASI_CLANG) --target=wasm32 -nostdlib -ffreestanding -fno-math-errno -Wl,--no-entry
+
+wasm-apps:
+	@if [ ! -x "$(WASI_CLANG)" ]; then echo "no wasm32-wasi clang at $(WASI_CLANG) (scripts/pve_wasm_tools.sh)"; exit 2; fi
+	@mkdir -p $(WASM_APPS_DIR)
+	@for s in $(WASM_APP_SRCS); do n=$$(basename $$s .c); \
+	    $(WASI_CC) -O2 -o $(WASM_APPS_DIR)/$$n.wasm $$s || exit 1; \
+	    $(WASI_CC) -O0 -o $(WASM_APPS_DIR)/$$n-O0.wasm $$s || exit 1; \
+	    $(WASI_CC) -O2 $(WASI_FEATURES) -o $(WASM_APPS_DIR)/$$n-feat.wasm $$s || exit 1; \
+	    gcc -O2 -o $(WASM_APPS_DIR)/$$n.host $$s -lm || exit 1; \
+	done
+	@$(PURE_CC) -O2 -o $(WASM_APPS_DIR)/pure.wasm $(PURE_SRC)
+	@$(PURE_CC) -O0 -o $(WASM_APPS_DIR)/pure-O0.wasm $(PURE_SRC)
+	@$(PURE_CC) -O2 $(WASI_FEATURES) -o $(WASM_APPS_DIR)/pure-feat.wasm $(PURE_SRC)
+	@gcc -O2 -ffp-contract=off -o $(WASM_APPS_DIR)/pure.host $(PURE_SRC) -lm
+	@echo "$(GREEN)✓ wasm apps: $$(ls $(WASM_APPS_DIR)/*.wasm | wc -l) modules in $(WASM_APPS_DIR)$(NC)"
+
+# [51.4] Готовые встроенные программы — из свежей сборки в дерево.
+# Собираются отдельно от проверочных вариантов: без отладочных секций и имён
+# (--strip-all) модуль в пять раз меньше — 30 КБ вместо 160, а в initrd он
+# идёт как есть. RUNE_DIST_OUT — куда класть (тест кладёт в сторону и сверяет
+# с деревом).
+RUNE_DIST_OUT ?= $(RUNE_DIST_DIR)
+wasm-dist:
+	@if [ ! -x "$(WASI_CLANG)" ]; then echo "no wasm32-wasi clang at $(WASI_CLANG) (scripts/pve_wasm_tools.sh)"; exit 2; fi
+	@mkdir -p $(RUNE_DIST_OUT)
+	@for n in $(RUNE_BUILTIN); do \
+	    $(WASI_CC) -O2 -Wl,--strip-all -o $(RUNE_DIST_OUT)/$$n.wasm userspace/wasm/$$n.c || exit 1; \
+	done
+	@echo "$(GREEN)✓ wasm dist: $(RUNE_BUILTIN) -> $(RUNE_DIST_OUT)$(NC)"
+
+wasm-host-asan: build/wasm_host_asan
+build/wasm_host_asan: tools/wasm_host.c $(WASM_ENGINE) kernel/arch/x86_64/wasm.h kernel/arch/x86_64/wasm_int.h kernel/arch/x86_64/wasm_wasi.h
+	@mkdir -p $(dir $@)
+	@gcc -O1 -g -Wall -fsanitize=address,undefined -fno-sanitize-recover=undefined -o $@ tools/wasm_host.c $(WASM_ENGINE)
+
+# ----------------------------------------------------------------------------
+# Этап 45: host-утилита mkamf и пакеты Amply (.amf), которые попадают в initrd.
+# ----------------------------------------------------------------------------
+MKAMF_HOST    := build/mkamf
+AMPLY_PKG_DIR := amply_pkgs
+AMPLY_BUILD   := build/amply
+AMPLY_PKGS    := welcome cyber-theme notes-pack
+# Имена .amf в initrd — без дефисов, чтобы из VFS их можно было открыть
+# простым lookup'ом.  Сопоставление с папкой даёт MKAMF_<name> функция ниже.
+AMPLY_AMF_FILES := $(AMPLY_BUILD)/amply_welcome.amf \
+                   $(AMPLY_BUILD)/amply_cyber_theme.amf \
+                   $(AMPLY_BUILD)/amply_notes_pack.amf
+AMPLY_INDEX     := $(AMPLY_BUILD)/amply_index.txt
+
+$(MKAMF_HOST): tools/mkamf.c
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)HOST-CC  mkamf$(NC)"
+	@gcc -O2 -Wall -o $@ $<
+
+$(AMPLY_BUILD)/amply_welcome.amf: $(MKAMF_HOST) \
+                                  $(AMPLY_PKG_DIR)/welcome/manifest.ini \
+                                  $(shell find $(AMPLY_PKG_DIR)/welcome/files -type f 2>/dev/null)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)MKAMF    welcome$(NC)"
+	@$(MKAMF_HOST) $@ $(AMPLY_PKG_DIR)/welcome
+
+$(AMPLY_BUILD)/amply_cyber_theme.amf: $(MKAMF_HOST) \
+                                      $(AMPLY_PKG_DIR)/cyber-theme/manifest.ini \
+                                      $(shell find $(AMPLY_PKG_DIR)/cyber-theme/files -type f 2>/dev/null)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)MKAMF    cyber-theme$(NC)"
+	@$(MKAMF_HOST) $@ $(AMPLY_PKG_DIR)/cyber-theme
+
+$(AMPLY_BUILD)/amply_notes_pack.amf: $(MKAMF_HOST) \
+                                     $(AMPLY_PKG_DIR)/notes-pack/manifest.ini \
+                                     $(shell find $(AMPLY_PKG_DIR)/notes-pack/files -type f 2>/dev/null)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)MKAMF    notes-pack$(NC)"
+	@$(MKAMF_HOST) $@ $(AMPLY_PKG_DIR)/notes-pack
+
+$(AMPLY_INDEX): $(AMPLY_PKG_DIR)/index.txt
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(INITRD_IMG): $(MKINITRD_HOST) $(INITRD_FILES)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)MKINITRD $@$(NC)"
+	@$(MKINITRD_HOST) $@ $(INITRD_FILES) >/dev/null
+	@echo "$(GREEN)✓ initrd: $@$(NC)"
+
+# ----------------------------------------------------------------------------
+# Этап 37.5b: FAT32 disk-image (16 MB) с парой текстовых файлов в root.
+# Используется для теста ATA + FAT32 read-only пути.  QEMU цепляется через
+# `-drive file=$(DISK_IMG),format=raw,if=ide,index=0` (Primary Master).
+# ----------------------------------------------------------------------------
+DISK_IMG  := build/disk-x86_64.img
+MKDISK_SH := scripts/mkdisk-x86_64.sh
+
+$(DISK_IMG): $(MKDISK_SH)
+	@mkdir -p $(dir $@)
+	@bash $(MKDISK_SH) $@ >/dev/null
+	@echo "$(GREEN)✓ disk: $@$(NC)"
+
+# ----------------------------------------------------------------------------
+# Этап 39: musl-aos libc + sysroot.
+# Цель: собрать `libc.a` + `crt0.o` + headers и установить их в
+# build/sysroot/{usr/include,usr/lib}, после чего host-GCC сможет компилить
+# обычные C-программы под AMPLIFY-OS через:
+#   gcc --sysroot=build/sysroot -nostdinc -isystem build/sysroot/usr/include \
+#       hello.c -o hello.elf
+# Линкер использует build/sysroot/usr/lib/{crt0.o,libc.a} + user.ld.
+# ----------------------------------------------------------------------------
+LIBC_DIR    := libc-x86_64
+SYSROOT     := build/sysroot
+SYSROOT_INC := $(SYSROOT)/usr/include
+SYSROOT_LIB := $(SYSROOT)/usr/lib
+
+LIBC_BUILD  := $(BUILD_DIR)/libc
+LIBC_AR     := $(SYSROOT_LIB)/libc.a
+LIBC_CRT0   := $(SYSROOT_LIB)/crt0.o
+
+# CFLAGS для libc: target = freestanding x86_64 user-mode.
+# -mcmodel=large ОБЯЗАТЕЛЕН: user.ld линкует ELF в 0x80_0000_0000 (PML4[1]).
+#   В small-model (default) все relocations ограничены 32-битным sign-extended
+#   указателем (±2 GB от 0), и линкер падает "R_X86_64_32 truncated". В large
+#   GCC использует 64-битные movabs, что работает для любого адреса.
+# Заголовки тянем СТРОГО из libc-x86_64/include — никаких host'овских.
+LIBC_CFLAGS := -m64 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
+               -nostdinc -isystem $(LIBC_DIR)/include \
+               -Wall -O2 -fno-asynchronous-unwind-tables \
+               -mno-red-zone -mcmodel=large
+
+LIBC_ASMFLAGS := --64
+
+# Список всех .c исходников libc.
+LIBC_C_SRC := \
+    $(LIBC_DIR)/src/crt/crt1.c \
+    $(LIBC_DIR)/src/errno/errno.c \
+    $(LIBC_DIR)/src/string/string.c \
+    $(LIBC_DIR)/src/ctype/ctype.c \
+    $(LIBC_DIR)/src/unistd/unistd.c \
+    $(LIBC_DIR)/src/stdlib/malloc.c \
+    $(LIBC_DIR)/src/stdlib/strtol.c \
+    $(LIBC_DIR)/src/stdlib/qsort.c \
+    $(LIBC_DIR)/src/stdio/init.c \
+    $(LIBC_DIR)/src/stdio/printf.c \
+    $(LIBC_DIR)/src/stdio/stream.c \
+    $(LIBC_DIR)/src/fcntl/fcntl.c \
+    $(LIBC_DIR)/src/sys_stat/stat.c \
+    $(LIBC_DIR)/src/sys_mman/mman.c \
+    $(LIBC_DIR)/src/signal/signal.c \
+    $(LIBC_DIR)/src/time/time.c \
+    $(LIBC_DIR)/src/pthread/pthread.c \
+    $(LIBC_DIR)/src/locale/locale.c \
+    $(LIBC_DIR)/src/socket/socket.c \
+    $(LIBC_DIR)/src/math/math.c
+
+LIBC_S_SRC := \
+    $(LIBC_DIR)/src/syscall/syscall.S \
+    $(LIBC_DIR)/src/setjmp/setjmp.S \
+    $(LIBC_DIR)/src/signal/sigreturn.S
+
+LIBC_C_OBJ := $(patsubst $(LIBC_DIR)/%.c,$(LIBC_BUILD)/%.o,$(LIBC_C_SRC))
+LIBC_S_OBJ := $(patsubst $(LIBC_DIR)/%.S,$(LIBC_BUILD)/%.o,$(LIBC_S_SRC))
+LIBC_OBJS  := $(LIBC_C_OBJ) $(LIBC_S_OBJ)
+
+$(LIBC_BUILD)/%.o: $(LIBC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)CC-LIBC $<$(NC)"
+	@$(CC) $(LIBC_CFLAGS) -c $< -o $@
+
+$(LIBC_BUILD)/%.o: $(LIBC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)AS-LIBC $<$(NC)"
+	@$(CC) $(LIBC_CFLAGS) -c $< -o $@
+
+# crt0.o собирается отдельно — это объект ENTRY-handoff'а из ядра.
+$(LIBC_CRT0): $(LIBC_DIR)/src/crt/crt0.S
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)CRT0    $@$(NC)"
+	@$(CC) $(LIBC_CFLAGS) -c $< -o $@
+
+$(LIBC_AR): $(LIBC_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)AR      $@$(NC)"
+	@ar rcs $@ $(LIBC_OBJS)
+
+# Устанавливаем headers в sysroot (rsync через cp -r, чтобы не зависеть от rsync).
+.PHONY: sysroot sysroot-headers
+sysroot-headers: $(SYSROOT_INC)/.headers-installed
+$(SYSROOT_INC)/.headers-installed: $(LIBC_DIR)/include
+	@mkdir -p $(SYSROOT_INC)
+	@cp -r $(LIBC_DIR)/include/. $(SYSROOT_INC)/
+	@touch $@
+
+sysroot: sysroot-headers $(LIBC_AR) $(LIBC_CRT0) $(LIBC_SO)
+	@cp $(USER_DIR)/user.ld $(SYSROOT_LIB)/user.ld
+	@echo "$(GREEN)✓ sysroot ready at $(SYSROOT)$(NC)"
+	@echo "$(YELLOW)  Use: gcc --sysroot=$(SYSROOT) -nostdinc \\$(NC)"
+	@echo "$(YELLOW)            -isystem $(SYSROOT)/usr/include \\$(NC)"
+	@echo "$(YELLOW)            -nostdlib hello.c $(SYSROOT_LIB)/crt0.o \\$(NC)"
+	@echo "$(YELLOW)            -L$(SYSROOT_LIB) -lc -T $(SYSROOT_LIB)/user.ld \\$(NC)"
+	@echo "$(YELLOW)            -o hello.elf$(NC)"
+
+# ----------------------------------------------------------------------------
+# Этап 40 группа E: libc.so — динамическая версия libc (PIC).
+# Собирается параллельно с libc.a теми же source-файлами, но с -fPIC.
+# Фиксированный базовый адрес 0x7F0000000000 (ниже USER_BASE 0x80..., но не
+# конфликтует с heap и stack). В initrd копируется как /libc.so.
+# ----------------------------------------------------------------------------
+LIBC_PIC_BUILD := $(BUILD_DIR)/libc-pic
+LIBC_SO        := $(SYSROOT_LIB)/libc.so
+
+LIBC_PIC_CFLAGS := -m64 -ffreestanding -fPIC -fno-stack-protector -fno-builtin \
+                   -nostdinc -isystem $(LIBC_DIR)/include \
+                   -Wall -O2 -fno-asynchronous-unwind-tables \
+                   -mno-red-zone -mcmodel=large
+
+LIBC_PIC_C_OBJ := $(patsubst $(LIBC_DIR)/%.c,$(LIBC_PIC_BUILD)/%.o,$(LIBC_C_SRC))
+LIBC_PIC_S_OBJ := $(patsubst $(LIBC_DIR)/%.S,$(LIBC_PIC_BUILD)/%.o,$(LIBC_S_SRC))
+LIBC_PIC_OBJS  := $(LIBC_PIC_C_OBJ) $(LIBC_PIC_S_OBJ)
+
+$(LIBC_PIC_BUILD)/%.o: $(LIBC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)CC-PIC  $<$(NC)"
+	@$(CC) $(LIBC_PIC_CFLAGS) -c $< -o $@
+
+$(LIBC_PIC_BUILD)/%.o: $(LIBC_DIR)/%.S
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)AS-PIC  $<$(NC)"
+	@$(CC) $(LIBC_PIC_CFLAGS) -c $< -o $@
+
+$(LIBC_SO): $(LIBC_PIC_OBJS)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)LD-SO   $@$(NC)"
+	@$(CC) -shared -nostdlib -fPIC -mcmodel=large \
+	       -Wl,-soname,libc.so \
+	       -Wl,-z,max-page-size=0x1000 \
+	       -Wl,--hash-style=both \
+	       -o $@ $(LIBC_PIC_OBJS)
+	@echo "$(GREEN)✓ libc.so: $@$(NC)"
+
+# ----------------------------------------------------------------------------
+# Этап 39 / тестовый пример: hello_libc.c — C-программа через sysroot.
+# Собирается через gcc --sysroot=build/sysroot, попадает в initrd.
+# ----------------------------------------------------------------------------
+USER_HELLO_LIBC := $(USER_BUILD)/hello_libc.elf
+
+$(USER_HELLO_LIBC): $(USER_DIR)/hello_libc.c $(LIBC_AR) $(LIBC_CRT0) $(USER_DIR)/user.ld $(SYSROOT_INC)/.headers-installed
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)CC-USER $@  (sysroot=$(SYSROOT))$(NC)"
+	@$(CC) --sysroot=$(SYSROOT) -nostdinc \
+	       -isystem $(SYSROOT_INC) \
+	       -m64 -ffreestanding -fno-pie -no-pie -fno-stack-protector \
+	       -mcmodel=large -mno-red-zone \
+	       -O2 -Wall -nostdlib -static \
+	       -Wl,-T,$(USER_DIR)/user.ld -Wl,-z,max-page-size=0x1000 \
+	       $(LIBC_CRT0) $< -L$(SYSROOT_LIB) -lc \
+	       -o $@
+	@echo "$(GREEN)✓ user ELF: $@$(NC)"
+
+USER_HELLO_LIBC_BLOB := $(USER_BUILD)/hello_libc_blob.o
+$(USER_HELLO_LIBC_BLOB): $(USER_HELLO_LIBC)
+	@echo "$(YELLOW)OBJCOPY  $<  -> hello_libc blob$(NC)"
+	@objcopy -I binary -O elf64-x86-64 -B i386:x86-64 \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_HELLO_LIBC)))_start=user_hello_libc_elf_start \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_HELLO_LIBC)))_end=user_hello_libc_elf_end \
+	         --redefine-sym _binary_$(subst /,_,$(subst .,_,$(USER_HELLO_LIBC)))_size=user_hello_libc_elf_size \
+	         $< $@
+
+# ----------------------------------------------------------------------------
+# Этап 40 группа F: 6 мигрированных legacy-программ.
+# Каждая собирается через gcc --sysroot=build/sysroot + libc.a.
+# Правило шаблонное. Имена с префиксом stage40_ чтобы не конфликтовать с
+# legacy .asm-баз (hello.asm/counter.asm).
+# USER_MIGRATED список уже определён выше (перед INITRD_FILES).
+# ----------------------------------------------------------------------------
+
+$(USER_BUILD)/stage40_%.elf: $(USER_DIR)/stage40_%.c $(LIBC_AR) $(LIBC_CRT0) $(USER_DIR)/user.ld $(SYSROOT_INC)/.headers-installed
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)CC-USER $@$(NC)"
+	@$(CC) --sysroot=$(SYSROOT) -nostdinc \
+	       -isystem $(SYSROOT_INC) \
+	       -m64 -ffreestanding -fno-pie -no-pie -fno-stack-protector \
+	       -mcmodel=large -mno-red-zone \
+	       -O2 -Wall -nostdlib -static \
+	       -Wl,-T,$(USER_DIR)/user.ld -Wl,-z,max-page-size=0x1000 \
+	       $(LIBC_CRT0) $< -L$(SYSROOT_LIB) -lc \
+	       -o $@
+
+# ----------------------------------------------------------------------------
+# Этап 41: pattern-rule для stage41_*.c — тот же sysroot+libc, отдельный
+# префикс чтобы не пересекаться с stage40_ и legacy hello.asm/counter.asm.
+# ----------------------------------------------------------------------------
+$(USER_BUILD)/stage41_%.elf: $(USER_DIR)/stage41_%.c $(LIBC_AR) $(LIBC_CRT0) $(USER_DIR)/user.ld $(SYSROOT_INC)/.headers-installed
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)CC-USER $@$(NC)"
+	@$(CC) --sysroot=$(SYSROOT) -nostdinc \
+	       -isystem $(SYSROOT_INC) \
+	       -m64 -ffreestanding -fno-pie -no-pie -fno-stack-protector \
+	       -mcmodel=large -mno-red-zone \
+	       -O2 -Wall -nostdlib -static \
+	       -Wl,-T,$(USER_DIR)/user.ld -Wl,-z,max-page-size=0x1000 \
+	       $(LIBC_CRT0) $< -L$(SYSROOT_LIB) -lc \
+	       -o $@
+
+# Кладём counter+hello blob'ы в kernel ПО-ПРЕЖНЕМУ — на 37.5a удобно иметь
+# их ещё доступными как fallback. На 39-м добавили hello_libc_blob.
+OBJ     := $(ASM_OBJ) $(C_OBJ) $(USER_BLOB) $(USER_COUNTER_BLOB) $(USER_HELLO_LIBC_BLOB)
+
+GREEN := \033[0;32m
+YELLOW := \033[0;33m
+CYAN := \033[0;36m
+NC := \033[0m
+
+# ----------------------------------------------------------------------------
+# Этап 38: UEFI handoff.
+# BOOTEFI собирается отдельным sub-make'ом в uefi/. ESP-образ строим тут,
+# чтобы зависимости (kernel.bin + initrd.img) были в одном графе.
+# ----------------------------------------------------------------------------
+ESP_IMG    := build/esp.img
+
+.PHONY: all all-direct run run-bios run-direct run-debug clean bootefi esp run-uefi libc-test run-gpu run-gpu-direct \
+        iso run-installer run-installed run-installer-bios installer-disk-reset mind-model
+
+# Этап 49: положить свои модели AMPLIFY MIND (build/mind/*.gguf, кроме
+# встроенной stories260K) на dev-диск в /vault/mind — MIND найдёт первую
+# .gguf сам. Источник SmolLM2-135M-Instruct-Q8_0 и sha256 — в
+# scripts/stage49_golden.txt. -D o/-D s: без вопросов mtools на stdin.
+mind-model: $(DISK_IMG)
+	@MTOOLS_SKIP_CHECK=1 mmd -D s -i $(DISK_IMG) ::/vault ::/vault/mind </dev/null 2>/dev/null || true
+	@n=0; for f in build/mind/*.gguf; do \
+	    [ -f "$$f" ] || continue; \
+	    case "$$f" in *stories260K*) continue;; esac; \
+	    if [ $$(stat -c %s "$$f") -gt 700000000 ]; then \
+	        echo "$(YELLOW)MIND     $$f: больше dev-диска 1 ГБ — пропуск (для Qwen3 — ISO/установщик)$(NC)"; continue; fi; \
+	    echo "$(YELLOW)MIND     $$f -> /disk/vault/mind/$(NC)"; \
+	    MTOOLS_SKIP_CHECK=1 mcopy -D o -i $(DISK_IMG) "$$f" ::/vault/mind/ </dev/null && n=$$((n+1)); \
+	done; \
+	if [ $$n -eq 0 ]; then echo "$(YELLOW)build/mind/*.gguf не найдено — MIND будет использовать встроенную stories260K$(NC)"; fi
+
+# Этап 39: быстрая проверка, что sysroot работает. Собирает только
+# libc.a + crt0.o + hello_libc.elf, без полного kernel-билда.
+libc-test: sysroot $(USER_HELLO_LIBC)
+	@echo "$(GREEN)╔════════════════════════════════════════════════╗$(NC)"
+	@echo "$(GREEN)║   AMPLIFY-OS libc sysroot smoke-test (stage 39)║$(NC)"
+	@echo "$(GREEN)╚════════════════════════════════════════════════╝$(NC)"
+	@ls -lh $(USER_HELLO_LIBC) $(LIBC_AR) $(LIBC_CRT0)
+	@echo "$(GREEN)hello_libc.elf is a real ELF64 built through gcc --sysroot$(NC)"
+	@file $(USER_HELLO_LIBC) || true
+
+all: $(KERNEL) $(ISO) $(DISK_IMG) $(ESP_IMG)
+	@echo "$(GREEN)✓ AMPLIFY-OS x86_64 build complete.$(NC)"
+	@echo "$(YELLOW)Run: make ARCH=x86_64 run$(NC)"
+
+# Сборка БЕЗ ISO — для систем без xorriso/grub-mkrescue. QEMU грузит ядро
+# напрямую через -kernel + -initrd. Это валидный Multiboot2 boot path.
+all-direct: $(KERNEL) $(INITRD_IMG) $(DISK_IMG)
+	@echo "$(GREEN)✓ AMPLIFY-OS x86_64 build (no-ISO) complete.$(NC)"
+	@echo "$(YELLOW)Run: make ARCH=x86_64 run-direct$(NC)"
+
+# ----------------------------------------------------------------------------
+# Правила компиляции.
+# ----------------------------------------------------------------------------
+$(BUILD_DIR)/%.o: %.asm
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)NASM   $<$(NC)"
+	@$(ASM) $(ARCH_ASMFLAGS) $< -o $@
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "$(CYAN)CC64   $<$(NC)"
+	@$(CC) $(ARCH_CFLAGS) -c $< -o $@
+
+$(KERNEL): $(OBJ) $(KERNEL_LDSCRIPT)
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)LD     $@$(NC)"
+	@$(LD) $(ARCH_LDFLAGS) -o $@ $(OBJ)
+	@# [38.1.0] Конец образа (в адресах загрузки) обязан лежать ниже предела:
+	@# иначе система не загрузится вовсе, без единой строки (CLAUDE.md
+	@# §5.50). Пусть лучше упадёт сборка. Что за предел у какой раскладки —
+	@# см. HIGHER_HALF выше. KERNEL_END_LIMIT=0 — не проверять.
+	@end=$$(nm $@ | awk '$$3 == "$(KERNEL_END_SYM)" { print $$1 }'); \
+	 lim=$$(( $(KERNEL_END_LIMIT) )); used=$$(( 0x$$end )); \
+	 if [ $$lim -ne 0 ] && [ $$used -ge $$lim ]; then \
+	     echo "$(YELLOW)FATAL: kernel image ends at 0x$$end, limit is $(KERNEL_END_LIMIT)$(NC)"; \
+	     echo "       move large static arrays out of .bss (kmalloc / pmm)"; \
+	     rm -f $@; exit 1; \
+	 fi; \
+	 echo "  image end 0x$$end, $$(( (lim - used) / 1024 )) KB below the limit"
+	@echo "$(GREEN)✓ kernel: $@$(NC)"
+
+# ----------------------------------------------------------------------------
+# Этап 57: установочный ISO — гибридный образ.
+#   * BIOS:  GRUB (grub-mkrescue, i386-pc) → multiboot2 с cmdline
+#            "live installer" (boot/grub-x86_64.cfg).
+#   * UEFI:  второй El Torito-образ efiboot.img = LIVE_ESP_IMG — маленький
+#            FAT с нашим BOOTX64.EFI, ядром, initrd и маркером \live.flag.
+#            Прошивка грузит BOOTX64.EFI, тот видит live.flag и передаёт
+#            ядру cmdline "live installer".
+#   * USB:   тот же efiboot.img добавлен MBR-разделом типа 0xEF — после
+#            `dd` образа на флешку UEFI найдёт загрузчик и там.
+# В WSL/Debian обычно установлен только grub-pc-bin, поэтому EFI-ветку
+# grub-mkrescue сам не строит — мы передаём ему xorriso-опции явно.
+# ----------------------------------------------------------------------------
+LIVE_ESP_IMG := build/live-esp.img
+
+iso: $(ISO)
+
+$(LIVE_ESP_IMG): $(BOOTEFI) $(KERNEL) $(INITRD_IMG)
+	@echo "$(YELLOW)MK-LIVE-ESP $@  (BOOTX64.EFI + kernel + initrd + live.flag)$(NC)"
+	@rm -f $@
+	@# Размер — payload + 25% + 1 МиБ на служебные области FAT.  El Torito
+	@# хранит длину образа в 16-битном поле секторов, поэтому держимся < 32 МиБ.
+	@SZ_KB=$$(( ( $$(stat -c%s $(BOOTEFI)) + $$(stat -c%s $(KERNEL)) + \
+	              $$(stat -c%s $(INITRD_IMG)) ) / 1024 * 5 / 4 + 1024 )); \
+	if [ $$SZ_KB -gt 32000 ]; then \
+	    echo "$(YELLOW)live ESP слишком велик для El Torito: $$SZ_KB KiB$(NC)"; exit 1; \
+	fi; \
+	MKFS_VFAT=$$(command -v mkfs.vfat || echo /usr/sbin/mkfs.vfat); \
+	if [ ! -x "$$MKFS_VFAT" ]; then MKFS_VFAT=/sbin/mkfs.vfat; fi; \
+	"$$MKFS_VFAT" -C -n AMPLIFYLIVE $@ $$SZ_KB >/dev/null
+	@mmd -i $@ ::/EFI ::/EFI/BOOT
+	@mcopy -i $@ $(BOOTEFI)    ::/EFI/BOOT/BOOTX64.EFI
+	@mcopy -i $@ $(KERNEL)     ::/kernel.bin
+	@mcopy -i $@ $(INITRD_IMG) ::/initrd.img
+	@printf 'live' > $(BUILD_DIR)/live.flag
+	@mcopy -i $@ $(BUILD_DIR)/live.flag ::/live.flag
+	@echo "$(GREEN)✓ live ESP: $@$(NC)"
+
+# Модели AMPLIFY MIND на носителе (/mind/*.gguf): установщик копирует их на
+# системный раздел в /vault/mind, live-сессия грузит прямо с диска. Кладём
+# всё из build/mind, кроме встроенной stories260K (она уже в initrd).
+# Нет файлов — ISO собирается как раньше, MIND будет на встроенной модели.
+MIND_ISO_MODELS := $(filter-out %stories260K.gguf,$(wildcard build/mind/*.gguf))
+
+# [50.5] Образы гостей phantom на носителе (/guests/*.iso): приложение Phantom
+# показывает их в списке и запускает прямо с носителя, а установщик копирует в
+# /vault/phantom (если на машине есть VT-x). Кладём всё из build/guests — их
+# туда приносит человек (CLAUDE.md §2), в дереве исходников образов нет.
+GUEST_ISO_IMAGES := $(wildcard build/guests/*.iso)
+
+$(ISO): $(KERNEL) $(INITRD_IMG) $(LIVE_ESP_IMG) boot/grub-x86_64.cfg $(MIND_ISO_MODELS) $(GUEST_ISO_IMAGES)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)/boot/grub
+	@cp $(KERNEL) $(ISO_DIR)/boot/kernel-x86_64.bin
+	@cp $(INITRD_IMG) $(ISO_DIR)/boot/initrd.img
+	@cp boot/grub-x86_64.cfg $(ISO_DIR)/boot/grub/grub.cfg
+	@cp $(LIVE_ESP_IMG) $(ISO_DIR)/efiboot.img
+	@# [49.1] Жёсткие ссылки вместо копий: Qwen3-1.7B — 1.8 ГБ, вторая копия
+	@# в staging-каталоге ISO съедала бы место на диске (cp — запасной путь).
+	@if [ -n "$(MIND_ISO_MODELS)" ]; then mkdir -p $(ISO_DIR)/mind && \
+	    for f in $(MIND_ISO_MODELS); do ln -f "$$f" $(ISO_DIR)/mind/ 2>/dev/null || cp "$$f" $(ISO_DIR)/mind/; done && \
+	    echo "$(YELLOW)ISO      + MIND model(s): $(notdir $(MIND_ISO_MODELS))$(NC)"; fi
+	@if [ -n "$(GUEST_ISO_IMAGES)" ]; then mkdir -p $(ISO_DIR)/guests && \
+	    for f in $(GUEST_ISO_IMAGES); do ln -f "$$f" $(ISO_DIR)/guests/ 2>/dev/null || cp "$$f" $(ISO_DIR)/guests/; done && \
+	    echo "$(YELLOW)ISO      + guest image(s): $(notdir $(GUEST_ISO_IMAGES))$(NC)"; fi
+	@# [41.2] -d i386-pc: строить ТОЛЬКО BIOS-ветку GRUB. Без этого там, где
+	@# стоят ещё и модули x86_64-efi (узел Proxmox), grub-mkrescue добавляет
+	@# свой EFI-загрузчик первой EFI-записью El Torito, и под UEFI стартует
+	@# GRUB, а не наш BOOTX64.EFI из efiboot.img — ISO из WSL и с узла вели
+	@# себя по-разному (GRUB-EFI кладёт initrd в диапазон кучи ядра).
+	@$(GRUB_MKR) -d $(GRUB_PC_DIR) -o $(ISO) $(ISO_DIR) \
+	    -eltorito-alt-boot -e efiboot.img -no-emul-boot \
+	    -append_partition 2 0xef $(LIVE_ESP_IMG) 2>/dev/null
+	@echo "$(GREEN)✓ ISO (BIOS + UEFI installer): $(ISO)$(NC)"
+
+# ----------------------------------------------------------------------------
+# [41.2] dev-ISO: маленький (десятки МБ) UEFI-образ для быстрой заливки нового
+# ядра в ВМ с уже установленной системой (Proxmox, ВМ 402).  Отличия от
+# установочного ISO: нет \live.flag (ядро не открывает установщик, а монтирует
+# системный том на диске ВМ — модели MIND уже лежат там в /vault/mind), нет
+# моделей (2 ГБ не гоняем по сети ради каждой правки), нет BIOS-ветки GRUB.
+# Диск ВМ не меняется: ядро и initrd берутся с CD, ESP на диске остаётся
+# от установленной сборки — вынул ISO, и ВМ грузит прежнюю систему.
+# ----------------------------------------------------------------------------
+DEV_ISO     := build/amplify-dev.iso
+DEV_ISO_DIR := build/iso-dev
+DEV_ESP_IMG := build/dev-iso-esp.img
+
+dev-iso: $(DEV_ISO)
+
+$(DEV_ISO): $(BOOTEFI) $(KERNEL) $(INITRD_IMG)
+	@rm -rf $(DEV_ISO_DIR) $(DEV_ESP_IMG)
+	@mkdir -p $(DEV_ISO_DIR)
+	@SZ_KB=$$(( ( $$(stat -c%s $(BOOTEFI)) + $$(stat -c%s $(KERNEL)) + \
+	              $$(stat -c%s $(INITRD_IMG)) ) / 1024 * 5 / 4 + 1024 )); \
+	if [ $$SZ_KB -gt 32000 ]; then \
+	    echo "$(YELLOW)dev ESP слишком велик для El Torito: $$SZ_KB KiB$(NC)"; exit 1; \
+	fi; \
+	MKFS_VFAT=$$(command -v mkfs.vfat || echo /usr/sbin/mkfs.vfat); \
+	if [ ! -x "$$MKFS_VFAT" ]; then MKFS_VFAT=/sbin/mkfs.vfat; fi; \
+	"$$MKFS_VFAT" -C -n AMPLIFYDEV $(DEV_ESP_IMG) $$SZ_KB >/dev/null
+	@mmd -i $(DEV_ESP_IMG) ::/EFI ::/EFI/BOOT
+	@mcopy -i $(DEV_ESP_IMG) $(BOOTEFI)    ::/EFI/BOOT/BOOTX64.EFI
+	@mcopy -i $(DEV_ESP_IMG) $(KERNEL)     ::/kernel.bin
+	@mcopy -i $(DEV_ESP_IMG) $(INITRD_IMG) ::/initrd.img
+	@cp $(DEV_ESP_IMG) $(DEV_ISO_DIR)/efiboot.img
+	@xorriso -as mkisofs -quiet -V AMPLIFYDEV -o $(DEV_ISO) \
+	    -e efiboot.img -no-emul-boot $(DEV_ISO_DIR) 2>/dev/null
+	@echo "$(GREEN)✓ dev ISO (UEFI, без моделей и установщика): $(DEV_ISO)$(NC)"
+
+# ----------------------------------------------------------------------------
+# Запуск в QEMU — ЕДИНАЯ КОМАНДА: UEFI + все фичи (этапы 37-45).
+# Загрузка через OVMF (UEFI), наш loader BOOTX64.EFI грузит ядро.
+# Включает: сеть (RTL8139), звук (AC97), диск (FAT32), compositor,
+# GPU-ускорение через virtio-vga (этап 41).
+#
+# `-vga virtio` создаёт устройство virtio-vga-pci (PCI ID 0x1AF4:0x1050),
+# которое одновременно служит primary scanout (через VGA-compatibility-
+# интерфейс — нужен OVMF GOP и нашему VESA fallback) И полноценным
+# virtio-gpu device. Наш kernel/arch/x86_64/virtio_gpu.c находит его
+# через pci_find_device() и переключает doublebuf_swap() с CPU-memcpy
+# в VRAM на host-side команды TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
+# Если QEMU собран без virtio-vga (очень редко) — fallback в VESA
+# срабатывает автоматически, ОС не падает.
+# ----------------------------------------------------------------------------
+run: esp $(DISK_IMG)
+	@echo "$(GREEN)╔══════════════════════════════════════════════════╗$(NC)"
+	@echo "$(GREEN)║  AMPLIFY-OS x86_64 — UEFI + virtio-gpu (full)    ║$(NC)"
+	@echo "$(GREEN)╚══════════════════════════════════════════════════╝$(NC)"
+	@if [ -f /usr/share/ovmf/OVMF.fd ]; then \
+	    OVMF=/usr/share/ovmf/OVMF.fd ; \
+	elif [ -f /usr/share/OVMF/OVMF.fd ]; then \
+	    OVMF=/usr/share/OVMF/OVMF.fd ; \
+	elif [ -f /usr/share/edk2-ovmf/x64/OVMF.fd ]; then \
+	    OVMF=/usr/share/edk2-ovmf/x64/OVMF.fd ; \
+	else \
+	    echo "$(YELLOW)OVMF.fd not found. Falling back to GRUB (BIOS) boot.$(NC)" ; \
+	    echo "$(YELLOW)Install UEFI support: sudo apt install ovmf$(NC)" ; \
+	    $(MAKE) -f Makefile.x86_64 run-bios ; \
+	    exit 0 ; \
+	fi ; \
+	echo "  UEFI firmware: $$OVMF" ; \
+	if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then \
+	    CPUOPT="-enable-kvm -cpu host" ; \
+	    echo "  CPU mode: KVM + host (реальная модель ЦП хоста проброшена в гость)" ; \
+	else \
+	    CPUOPT="-cpu max" ; \
+	    echo "$(YELLOW)  /dev/kvm недоступен — fallback -cpu max (TCG, синтетическая модель)$(NC)" ; \
+	fi ; \
+	$(QEMU) -bios $$OVMF \
+	    $$CPUOPT \
+	    -machine pc \
+	    -drive format=raw,file=$(DISK_IMG),if=ide,index=0,media=disk \
+	    -drive format=raw,file=$(ESP_IMG),if=ide,index=1 \
+	    -m 1G -smp cpus=4,cores=4,threads=1 \
+	    -vga none -device virtio-vga,xres=1920,yres=1080 \
+	    -serial stdio \
+	    -display gtk,grab-on-hover=on -k en-us \
+	    -netdev user,id=net0 \
+	    -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+	    -object filter-dump,id=f1,netdev=net0,file=build/eth0-x86_64.pcap \
+	    -audiodev none,id=audio0 \
+	    -device AC97,audiodev=audio0 \
+	    -no-reboot -no-shutdown
+
+# Fallback: GRUB/BIOS boot (если нет OVMF или для отладки legacy-пути).
+# Тоже использует virtio-vga — драйвер virtio_gpu.c активируется одинаково
+# в BIOS- и UEFI-путях, потому что он работает через PCI scan, не через GOP.
+run-bios: all
+	@echo "$(GREEN)╔══════════════════════════════════════════════════╗$(NC)"
+	@echo "$(GREEN)║  AMPLIFY-OS x86_64 — BIOS/GRUB + virtio-gpu      ║$(NC)"
+	@echo "$(GREEN)╚══════════════════════════════════════════════════╝$(NC)"
+	@if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then \
+	    CPUOPT="-enable-kvm -cpu host" ; \
+	else \
+	    CPUOPT="-cpu max" ; \
+	fi ; \
+	$(QEMU) -cdrom $(ISO) -boot d -m 1G -smp cpus=4,cores=4,threads=1 \
+	         $$CPUOPT \
+	         -vga none -device virtio-vga,xres=1920,yres=1080 \
+	         -serial stdio \
+	         -display gtk,grab-on-hover=on -k en-us \
+	         -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+	         -netdev user,id=net0 \
+	         -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+	         -object filter-dump,id=f1,netdev=net0,file=build/eth0-x86_64.pcap \
+	         -audiodev none,id=audio0 \
+	         -device AC97,audiodev=audio0 \
+	         -no-reboot -no-shutdown
+
+# Запуск БЕЗ ISO — QEMU грузит multiboot2 ядро напряму�� (для систем без
+# xorriso/grub-mkrescue). qemu-system-x86_64 умеет multiboot1/2 через -kernel.
+run-direct: all-direct
+	@echo "$(GREEN)╔══════════════════════════════════════════╗$(NC)"
+	@echo "$(GREEN)║  AMPLIFY-OS x86_64 (37.6c-1, direct)     ║$(NC)"
+	@echo "$(GREEN)╚══════════════════════════════════════════╝$(NC)"
+	@$(QEMU) -kernel $(KERNEL) -initrd $(INITRD_IMG) \
+	         -m 256M -vga std -global VGA.vgamem_mb=16 -serial stdio \
+	         -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+	         -netdev user,id=net0 \
+	         -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+	         -object filter-dump,id=f1,netdev=net0,file=build/eth0-x86_64.pcap \
+	         -audiodev none,id=audio0 \
+	         -device AC97,audiodev=audio0 \
+	         -no-reboot -no-shutdown
+
+# С GDB на :1234.
+run-debug: all
+	@$(QEMU) -cdrom $(ISO) -boot d -m 256M -vga std -global VGA.vgamem_mb=16 -serial stdio \
+	         -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+	         -no-reboot -no-shutdown -s -S &
+	@echo "GDB: target remote :1234"
+
+# ----------------------------------------------------------------------------
+# Этап 41: GPU-ускоренный запуск через virtio-gpu.
+# ----------------------------------------------------------------------------
+# Отличия от обычного `run`:
+#   * `-vga none`     — отключаем эмулируемый VGA-адаптер (Bochs/std), чтобы
+#                       единственным дисплеем был virtio-gpu. QEMU тогда
+#                       автоматически прописывает scanout в окно SDL/GTK.
+#   * `-device virtio-gpu-pci`
+#                     — собственно virtio-gpu transitional-устройство.
+#                       Вендор 0x1AF4, device 0x1050. Наш драйвер
+#                       virtio_gpu.c найдёт его через pci_find_device.
+# Если на хосте нет SDL/GTK (headless WSL без X) — добавьте `-display none`,
+# но тогда визуальной картинки не будет, только serial. Для тестов с
+# scripts/test_stage41_gpu.sh так и делаем (через -display none + screendump).
+#
+# Memory: GPU-ресурс размером 1024x768x4 = 3 MB живёт в kernel heap. Если
+# хочется протестировать большее разрешение, передайте в QEMU
+# -global VGA.vgamem_mb=16 (для VESA-fb) ИЛИ переключите Multiboot2-запрос
+# в boot.asm (на этапе 41 не делаем).
+# ----------------------------------------------------------------------------
+run-gpu: all
+	@echo "$(GREEN)╔══════════════════════════════════════════════════╗$(NC)"
+	@echo "$(GREEN)║  AMPLIFY-OS x86_64 (stage 41) — virtio-gpu       ║$(NC)"
+	@echo "$(GREEN)╚══════════════════════════════════════════════════╝$(NC)"
+	@$(QEMU) -cdrom $(ISO) -boot d -m 256M -vga std -global VGA.vgamem_mb=16 \
+	         -device virtio-gpu-pci,disable-legacy=off,disable-modern=on,xres=1920,yres=1080 \
+	         -serial stdio \
+	         -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+	         -netdev user,id=net0 \
+	         -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+	         -object filter-dump,id=f1,netdev=net0,file=build/eth0-x86_64.pcap \
+	         -audiodev none,id=audio0 \
+	         -device AC97,audiodev=audio0 \
+	         -no-reboot -no-shutdown
+
+# Та же конфигурация без ISO — для систем без grub-mkrescue/xorriso.
+run-gpu-direct: all-direct
+	@echo "$(GREEN)╔══════════════════════════════════════════════════╗$(NC)"
+	@echo "$(GREEN)║  AMPLIFY-OS x86_64 (stage 41) virtio-gpu, direct ║$(NC)"
+	@echo "$(GREEN)╚══════════════════════════════════════════════════╝$(NC)"
+	@$(QEMU) -kernel $(KERNEL) -initrd $(INITRD_IMG) \
+	         -m 256M -vga std -global VGA.vgamem_mb=16 \
+	         -device virtio-gpu-pci,disable-legacy=off,disable-modern=on,xres=1920,yres=1080 \
+	         -serial stdio \
+	         -drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk \
+	         -netdev user,id=net0 \
+	         -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+	         -object filter-dump,id=f1,netdev=net0,file=build/eth0-x86_64.pcap \
+	         -audiodev none,id=audio0 \
+	         -device AC97,audiodev=audio0 \
+	         -no-reboot -no-shutdown
+
+# ----------------------------------------------------------------------------
+# Этап 38: UEFI боот.
+# ----------------------------------------------------------------------------
+# 1. bootefi — собирает build/uefi/BOOTX64.EFI через uefi/Makefile.
+# 2. esp     — формирует FAT32-образ build/esp.img со структурой:
+#                /EFI/BOOT/BOOTX64.EFI   — наш loader
+#                /kernel.bin             — ELF64 ядра (тот же, что в ISO)
+#                /initrd.img             — RAM-диск
+# 3. run-uefi— qemu-system-x86_64 + OVMF firmware, грузится с esp.img.
+# Disk-образ /disk/* подцепляется отдельно через -drive if=ide,index=0,
+# наш ATA-драйвер ищет Primary Master и видит именно его. ESP сидит на
+# Primary Slave (index=1) — OVMF её всё равно перечислит.
+# ----------------------------------------------------------------------------
+bootefi: $(BOOTEFI)
+
+$(BOOTEFI): uefi/main.c uefi/Makefile
+	@echo "$(YELLOW)MAKE -C uefi  (BOOTX64.EFI)$(NC)"
+	@$(MAKE) -C uefi all >/dev/null
+	@echo "$(GREEN)✓ EFI loader: $@$(NC)"
+
+esp: $(ESP_IMG)
+
+$(ESP_IMG): $(BOOTEFI) $(KERNEL) $(INITRD_IMG)
+	@echo "$(YELLOW)MK-ESP $@  (BOOTX64.EFI + kernel.bin + initrd.img)$(NC)"
+	@dd if=/dev/zero of=$@ bs=1M count=64 status=none
+	@# mkfs.vfat на Debian живёт в /usr/sbin (не в PATH обычного юзера).
+	@# Ищем в стандартных местах; на крайний случай PATH-fallback.
+	@MKFS_VFAT=$$(command -v mkfs.vfat || echo /usr/sbin/mkfs.vfat); \
+	if [ ! -x "$$MKFS_VFAT" ]; then MKFS_VFAT=/sbin/mkfs.vfat; fi; \
+	if [ ! -x "$$MKFS_VFAT" ]; then \
+	    echo "$(YELLOW)mkfs.vfat не найден. sudo apt install dosfstools$(NC)"; \
+	    exit 1; \
+	fi; \
+	"$$MKFS_VFAT" -F 32 -n AMPLIFY $@ >/dev/null
+	@mmd -i $@ ::/EFI ::/EFI/BOOT
+	@mcopy -i $@ $(BOOTEFI)   ::/EFI/BOOT/BOOTX64.EFI
+	@mcopy -i $@ $(KERNEL)    ::/kernel.bin
+	@mcopy -i $@ $(INITRD_IMG) ::/initrd.img
+	@# Этап 57: dev-ESP НЕ содержит \live.flag — `make run` грузится сразу
+	@# в систему.  Установщик живёт в ISO (см. LIVE_ESP_IMG / run-installer).
+	@if [ -f uefi/startup.nsh ]; then mcopy -i $@ uefi/startup.nsh ::/startup.nsh; fi
+	@echo "$(GREEN)✓ ESP: $@$(NC)"
+
+# run-uefi — алиас для run (UEFI теперь основной путь).
+run-uefi: run
+
+# ----------------------------------------------------------------------------
+# Этап 57: проверка установщика в QEMU.
+#   make run-installer       — UEFI: ISO как CD + пустой целевой диск.
+#                              После «RESTART NOW» машина грузится уже с
+#                              целевого диска (bootindex=0), как реальный ПК
+#                              после извлечения носителя.
+#   make run-installed       — UEFI: только целевой диск (установленная ОС).
+#   make run-installer-bios  — тот же ISO через GRUB/SeaBIOS.
+#   make installer-disk-reset— удалить целевой образ (следующий run-installer
+#                              начнёт с чистого диска).
+# Целевой диск — qcow2 (TARGET_DISK_SIZE, минимум 2G).  Не raw: сырой 4 ГиБ
+# файл на /mnt/<диск> (NTFS через WSL) при записи резервной GPT в самый
+# конец дозаполняется нулями целиком — медленно и занимает все 4 ГиБ.
+# ----------------------------------------------------------------------------
+TARGET_DISK      ?= build/target-disk.qcow2
+TARGET_DISK_SIZE ?= 4G
+
+OVMF_FD = $(firstword $(wildcard /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF.fd \
+                                 /usr/share/edk2-ovmf/x64/OVMF.fd /usr/share/qemu/OVMF.fd))
+KVM_OPT = $(shell if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "-enable-kvm -cpu host"; \
+                  else echo "-cpu max"; fi)
+
+INSTALLER_QEMU_COMMON = -machine pc -m 1G -smp cpus=4,cores=4,threads=1 \
+    -vga none -device virtio-vga,xres=1920,yres=1080 \
+    -serial stdio -display gtk,grab-on-hover=on -k en-us \
+    -netdev user,id=net0 -device rtl8139,netdev=net0,mac=52:54:00:12:34:56 \
+    -audiodev none,id=audio0 -device AC97,audiodev=audio0
+
+$(TARGET_DISK):
+	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)TARGET-DISK $@ ($(TARGET_DISK_SIZE), qcow2)$(NC)"
+	@qemu-img create -q -f qcow2 $@ $(TARGET_DISK_SIZE)
+
+installer-disk-reset:
+	@rm -f $(TARGET_DISK)
+	@echo "$(GREEN)✓ target disk removed: $(TARGET_DISK)$(NC)"
+
+run-installer: $(ISO) $(TARGET_DISK)
+	@if [ -z "$(OVMF_FD)" ]; then echo "$(YELLOW)OVMF.fd не найден: sudo apt install ovmf$(NC)"; exit 1; fi
+	@echo "$(GREEN)AMPLIFY-OS installer (UEFI): $(ISO) -> $(TARGET_DISK)$(NC)"
+	@$(QEMU) -bios $(OVMF_FD) $(KVM_OPT) $(INSTALLER_QEMU_COMMON) \
+	    -drive file=$(TARGET_DISK),format=qcow2,if=none,id=target \
+	    -device ide-hd,drive=target,bus=ide.0,unit=0,bootindex=0 \
+	    -drive file=$(ISO),format=raw,if=none,id=live,media=cdrom,readonly=on \
+	    -device ide-cd,drive=live,bus=ide.1,unit=0,bootindex=1 \
+	    -no-shutdown
+
+run-installed: $(TARGET_DISK)
+	@if [ -z "$(OVMF_FD)" ]; then echo "$(YELLOW)OVMF.fd не найден: sudo apt install ovmf$(NC)"; exit 1; fi
+	@echo "$(GREEN)AMPLIFY-OS from the installed disk: $(TARGET_DISK)$(NC)"
+	@$(QEMU) -bios $(OVMF_FD) $(KVM_OPT) $(INSTALLER_QEMU_COMMON) \
+	    -drive file=$(TARGET_DISK),format=qcow2,if=none,id=target \
+	    -device ide-hd,drive=target,bus=ide.0,unit=0,bootindex=0 \
+	    -no-shutdown
+
+run-installer-bios: $(ISO) $(TARGET_DISK)
+	@echo "$(GREEN)AMPLIFY-OS installer (BIOS/GRUB): $(ISO) -> $(TARGET_DISK)$(NC)"
+	@$(QEMU) $(KVM_OPT) $(INSTALLER_QEMU_COMMON) \
+	    -drive file=$(TARGET_DISK),format=qcow2,if=ide,index=0,media=disk \
+	    -cdrom $(ISO) -boot d \
+	    -no-reboot -no-shutdown
+
+clean:
+	@rm -rf $(BUILD_DIR) $(ISO_DIR) $(KERNEL) $(ISO) $(ESP_IMG) $(LIVE_ESP_IMG) build/uefi
+	@$(MAKE) -C uefi clean >/dev/null 2>&1 || true
+	@echo "$(GREEN)✓ x86_64 build cleaned.$(NC)"

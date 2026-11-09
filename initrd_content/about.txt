@@ -1,0 +1,14 @@
+O sisteme MyOS
+===============
+
+Nazvanie:    MyOS
+Versiya:     0.9
+Arhitektura: x86 (i386, Protected Mode)
+Yadro:       Monolitnoe
+Pamyat':     Do 512 MB (bitmap PMM + paging)
+FS:          InitRD (nachal'nyj RAM-disk)
+Klaviatura:  PS/2 (IRQ1)
+Tajmer:      PIT 8254 (100 Hz)
+Video:       VGA Text Mode 80x25, 16 tsvetov
+
+(c) 2026 MyOS Team. Vse prava zashchishcheny.

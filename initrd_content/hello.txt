@@ -1,0 +1,15 @@
+Dobro pozhalovat' v MyOS!
+===========================
+
+Eto prostaya operatsionnaya sistema, napisannaya s nulya.
+Ona podderzhivaet:
+  - Zashchishchyonnyj rezhim (Protected Mode)
+  - Preryvaniia (IDT, ISR, IRQ)
+  - Klaviaturu PS/2
+  - Tajmer PIT
+  - Upravlenie pamyat'yu (PMM, Paging, Heap)
+  - Fajlovuyu sistemu InitRD
+  - Virtual File System (VFS)
+
+Versiya: 0.9
+Avtor: MyOS Team
